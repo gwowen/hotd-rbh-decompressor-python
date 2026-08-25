@@ -1,0 +1,44 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv
+
+# proprietary game files (do not commit / redistribute)
+assets/
+
+# output
+decompressed_assets/
+out
+dist
+*_png/
+*.decomp.rbh
+*.decomp.vmc
+*.decomp.VMC
+
+# coverage
+coverage
+*.lcov
+
+# logs / env
+logs
+.env
+.env.*
+
+# caches
+.cache
+
+# IntelliJ / Finder
+.idea
+.DS_Store
+
+# HOTD Executable - not supplied
+hotd-exe/*.exe
