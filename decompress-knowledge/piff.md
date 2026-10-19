@@ -2,7 +2,7 @@
 
 How bytes sit on disk before any asset-specific parse. RBHF (`.rbh`) and VVTP (`.vmc`) both use this layer.
 
-Decomp anchors: `FUN_00410e68` (PACK unpack), `FUN_00410818` / `FUN_00410d3c` / `FUN_00585aa0` (LZ), `FUN_005769c0` (PIFF+RBHF probe), `FUN_00576610` (PIFF+VVTP load).
+Decomp anchors: `UnpackPackToBody` (`FUN_00410e68`) (PACK unpack), `LzReadSignedVarint` (`FUN_00410818`) / `LzDecompressHunk` (`FUN_00410d3c`) / `LzDecompressBuffered` (`FUN_00585aa0`) (LZ), `LoadPiffRbh` (`FUN_005769c0`) (PIFF+RBHF probe), `LoadPiffVvtp` (`FUN_00576610`) (PIFF+VVTP load).
 
 ## PIFF file
 
@@ -45,7 +45,7 @@ The parser walks until EOF. Trailing bytes after the last chunk are an error.
 
 ## PACK → BODY
 
-A `PACK` chunk is a compressed `BODY`. Unpack (`FUN_00410e68`) concatenates **hunks** until a terminator:
+A `PACK` chunk is a compressed `BODY`. Unpack (`UnpackPackToBody` (`FUN_00410e68`)) concatenates **hunks** until a terminator:
 
 ```
 repeat:
@@ -65,7 +65,7 @@ Uncompressed files already store `BODY` and never go through this path. Sound RB
 
 Codec used inside each PACK hunk. Stream of **signed varints**; negative tokens are back-references, non-negative tokens are literal runs.
 
-### Signed varint (`FUN_00410818`)
+### Signed varint (`LzReadSignedVarint` (`FUN_00410818`))
 
 First byte:
 
@@ -79,7 +79,7 @@ Continuation bytes: `0x80` = more, low 7 bits appended with a running shift of 6
 
 `value = sign * magnitude`.
 
-### Tokens (`FUN_00410d3c`)
+### Tokens (`LzDecompressHunk` (`FUN_00410d3c`))
 
 While output is shorter than `uncompressedSize`:
 
@@ -101,27 +101,27 @@ This layer is the only place that **decompresses** Tantalus LZ. Typed decoders (
 
 | File | Role |
 |------|------|
-| `src/piff.ts` | `loadPiff` / `serializePiff` / `decompressPiff` |
-| `src/pack.ts` | Walk hunk headers, call LZ per hunk, concatenate |
-| `src/lz.ts` | `readVarint` + `decompressLz` |
+| `src/hotd_decompress/piff.py` | `load_piff` / `serialize_piff` / `decompress_piff` |
+| `src/hotd_decompress/pack.py` | Walk hunk headers, call LZ per hunk, concatenate |
+| `src/hotd_decompress/lz.py` | `read_varint` + `decompress_lz` |
 
 ### `-d` / `--decompress`
 
 ```text
-bun run index.ts -d <file> [output]
+uv run hotd-decompress -d <file> [output]
 ```
 
-1. `loadPiff` — require magic `PIFF`, size field `== fileLength - 8`, walk chunks with **no** odd-size pad.
-2. `decompressPiff` — each `PACK` → `unpackPack` → `BODY`; other tags copied as-is.
-3. `serializePiff` — rewrite `PIFF` + same form + new chunk list (still unpadded).
+1. `load_piff` — require magic `PIFF`, size field `== fileLength - 8`, walk chunks with **no** odd-size pad.
+2. `decompress_piff` — each `PACK` → `unpack_pack` → `BODY`; other tags copied as-is.
+3. `serialize_piff` — rewrite `PIFF` + same form + new chunk list (still unpadded).
 4. Write bytes. Default: `decompressed_assets/<name>.decomp.<ext>` (parent dir created).
 
 Stdout: form, how many PACK chunks expanded, unpacked BODY bytes, tag counts, output path.
 
-A file that is already all `BODY` still round-trips (0 PACK expanded). Trailing zeros after a PACK terminator are ignored; leftover non-zero bytes abort.
+A file that is already all `BODY` still round-trips (0 PACK expanded). `-d --all` skips those files instead of writing them. Trailing zeros after a PACK terminator are ignored; leftover non-zero bytes abort.
 
 ### In-memory use (no `-d` write)
 
-`-p` and `-w` call `decompressPiff` on the loaded file, then parse the resulting `BODY`s. They do not write a `.decomp.*` PIFF unless you also run `-d`.
+`-p` and `-w` call `decompress_piff` on the loaded file, then parse the resulting `BODY`s. They do not write a `.decomp.*` PIFF unless you also run `-d`.
 
-Inspect / `-m` / `-s` / `-e` / `-c` use `loadRbh` and **do not** expand PACK. Packed mesh/sprite/evt/cam files need `-d` first.
+Inspect / `-m` / `-s` / `-e` / `-c` use `load_rbh` and **do not** expand PACK. Packed mesh/sprite/evt/cam files need `-d` first.

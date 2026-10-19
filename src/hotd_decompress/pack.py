@@ -1,7 +1,7 @@
 """
 PACK chunk unpacking (BODY ← PACK).
 
-Layout from hotd-decomp FUN_00410e68 pack/unpack path:
+Layout from hotd-decomp `UnpackPackToBody` (`FUN_00410e68`) pack/unpack path:
   repeat:
     u16 uncompressedSize
     if 0: end

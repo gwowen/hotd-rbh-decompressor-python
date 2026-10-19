@@ -1,7 +1,7 @@
 """
 Tantalus / House of the Dead LZ codec.
 
-Ported from hotd-decomp (FUN_00410818 / FUN_00410d3c / FUN_00585aa0):
+Ported from hotd-decomp (`LzReadSignedVarint` (`FUN_00410818`) / `LzDecompressHunk` (`FUN_00410d3c`) / `LzDecompressBuffered` (`FUN_00585aa0`)):
 signed 6+7-bit varints; negative tokens are back-references into the
 absolute output buffer; positive tokens are literal runs.
 """
@@ -18,7 +18,7 @@ class VarintRead:
 
 
 def read_varint(data: bytes, offset: int) -> VarintRead:
-    """Read a signed variable-length integer (FUN_00410818)."""
+    """Read a signed variable-length integer (`LzReadSignedVarint` (`FUN_00410818`))."""
     if offset >= len(data):
         raise ValueError("Unexpected end of compressed stream while reading varint")
 

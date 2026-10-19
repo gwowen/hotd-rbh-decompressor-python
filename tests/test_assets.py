@@ -192,6 +192,19 @@ def _load_json(path: Path) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _without_spawn_angles(node: object) -> object:
+    """Bun still prints ENTB rx/ry/rz as f32. This tree keeps the integer bits."""
+    if isinstance(node, dict):
+        return {
+            key: _without_spawn_angles(value)
+            for key, value in node.items()
+            if key not in {"rx", "ry", "rz"}
+        }
+    if isinstance(node, list):
+        return [_without_spawn_angles(item) for item in node]
+    return node
+
+
 def _approx_equal(a: object, b: object) -> bool:
     if isinstance(a, float) and isinstance(b, (int, float)):
         return a == pytest.approx(b)
@@ -247,8 +260,8 @@ def test_json_structure_matches_bun(
 
         convert_events_to_json(src, str(py_dir))
 
-    bun_json = _load_json(bun_dir / json_name)
-    py_json = _load_json(py_dir / json_name)
+    bun_json = _without_spawn_angles(_load_json(bun_dir / json_name))
+    py_json = _without_spawn_angles(_load_json(py_dir / json_name))
     # Absolute source paths differ across trees; compare the rest.
     if isinstance(bun_json, dict) and isinstance(py_json, dict):
         bun_json = {k: v for k, v in bun_json.items() if k != "source"}

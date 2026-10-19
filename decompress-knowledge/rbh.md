@@ -2,7 +2,7 @@
 
 `.rbh` files are PIFF forms named **RBHF** (“RBH file”). The container is shared; the BODY payloads are not. This report covers the container. Payload layouts are in the per-type reports.
 
-Decomp: `FUN_005769c0` probes `PIFF` + `RBHF` (`0x46464950` / `0x46484252`). Mesh load goes through `FUN_00419cac` / `FUN_00419cf4` → `FUN_005769c0`.
+Decomp: `LoadPiffRbh` (`FUN_005769c0`) probes `PIFF` + `RBHF` (`0x46464950` / `0x46484252`). Mesh load goes through `LoadCreatMeshBank` (`FUN_00419cac`) / `LoadWorldMeshBank` (`FUN_00419cf4`) → `LoadPiffRbh` (`FUN_005769c0`).
 
 ## File shape
 
@@ -104,11 +104,11 @@ The container does not store a type fourcc beyond `RBHF`. Heuristics used by thi
 ### Inspect (no flag)
 
 ```text
-bun run index.ts <file.rbh>
+uv run hotd-decompress <file.rbh>
 # no path → assets/evt/allstage/evtALL.rbh
 ```
 
-`inspectRbh` → `loadRbh` → `describeRbh`. Prints to stdout; **does not write a file** and **does not expand PACK**.
+`inspect_rbh` → `load_rbh` → `describe_rbh`. Prints to stdout; **does not write a file** and **does not expand PACK**.
 
 The summary lists:
 
@@ -125,10 +125,10 @@ The container parser does not pick a payload type. Other flags run their own heu
 
 | Flag | Entry | Failure |
 |------|--------|---------|
-| `-w` | `src/audio.ts` | no oneshoot / gamesnds BODY |
-| `-m` | `src/mesh.ts` | not flags `2,0` + float3 BODY1 |
-| `-s` | `src/sprite.ts` | not 1 BODY / not a sprite pointer table |
-| `-e` | `src/event.ts` | not 1 BODY / not a small root table |
-| `-c` | `src/camera.ts` | not 1 BODY / not a camera group table |
+| `-w` | `src/hotd_decompress/audio.py` | no oneshoot / gamesnds BODY |
+| `-m` | `src/hotd_decompress/mesh.py` | not flags `2,0` + float3 BODY1 |
+| `-s` | `src/hotd_decompress/sprite.py` | not 1 BODY / not a sprite pointer table |
+| `-e` | `src/hotd_decompress/event.py` | not 1 BODY / not a small root table |
+| `-c` | `src/hotd_decompress/camera.py` | not 1 BODY / not a camera group table |
 
 `-d` only rewrites PIFF (`PACK`→`BODY`); it does not interpret RBHH. See [piff.md](piff.md).

@@ -4,7 +4,7 @@ Camera rail bank (assets/cam/allstage/camALL.rbh).
 BODY0 root: groupPtrs[N] (N = firstPtr/4). Each group is a track-pointer
 table whose length is implied by (firstTrackPtr - groupPtr) / 4.
 
-Track (FUN_004caa70 Hermite-like keys):
+Track (`TickCameraRail` (`FUN_004caa70`) Hermite-like keys):
   +0x00 u16 keyCount
   +0x02 u16 channelId   // observed 2..6
   +0x04 Key[keyCount]
@@ -49,6 +49,79 @@ class CameraGroup:
 class CameraBank:
     groups: list[CameraGroup]
     path: str | None = None
+
+
+@dataclass
+class CameraVec3:
+    x: float
+    y: float
+    z: float
+
+
+@dataclass
+class CameraPose:
+    eye: CameraVec3
+    lookAt: CameraVec3
+
+
+def sample_track(track: CameraTrack, frame: float) -> float:
+    """Cubic Hermite lookup (`HermiteTrackLookup` (`FUN_00461858`)).
+
+    Span uses the previous key's slopeOut as m0 and the current key's slopeIn
+    as m1. Clamps to the first / last key when `frame` is outside the track.
+    """
+    keys = track.keys
+    if not keys:
+        return 0.0
+    first = keys[0]
+    if len(keys) == 1 or frame <= first.t:
+        return first.value
+    last = keys[-1]
+    if frame >= last.t:
+        return last.value
+
+    i = 1
+    while i < len(keys) and keys[i].t < frame:
+        i += 1
+    k0 = keys[i - 1]
+    k1 = keys[i]
+    dt = k1.t - k0.t
+    if dt == 0.0:
+        return k1.value
+
+    u = (frame - k0.t) / dt
+    u2 = u * u
+    u3 = u2 * u
+    h00 = 2.0 * u3 - 3.0 * u2 + 1.0
+    h10 = u3 - 2.0 * u2 + u
+    h01 = -2.0 * u3 + 3.0 * u2
+    h11 = u3 - u2
+    return (
+        h00 * k0.value
+        + h10 * k0.slopeOut * dt
+        + h01 * k1.value
+        + h11 * k1.slopeIn * dt
+    )
+
+
+def sample_camera_group(group: CameraGroup, frame: float) -> CameraPose:
+    """Pose channels are track order, not channelId: 0–2 eye XYZ, 3–5 look-at XYZ."""
+    if len(group.tracks) < 6:
+        raise ValueError(
+            f"Camera group {group.index} has {len(group.tracks)} tracks, need 6"
+        )
+    sampled = [sample_track(group.tracks[i], frame) for i in range(6)]
+    return CameraPose(
+        eye=CameraVec3(x=sampled[0], y=sampled[1], z=sampled[2]),
+        lookAt=CameraVec3(x=sampled[3], y=sampled[4], z=sampled[5]),
+    )
+
+
+def camera_group_by_index(bank: CameraBank, index: int) -> CameraGroup | None:
+    for group in bank.groups:
+        if group.index == index:
+            return group
+    return None
 
 
 def looks_like_root_table(body: bytes) -> bool:

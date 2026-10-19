@@ -3,8 +3,9 @@ name = "hotd-decompress"
 version = "0.1.0"
 description = "Decompression CLI for House of the Dead (PC / Tantalus) PIFF assets."
 readme = "README.md"
+license = "MIT"
 authors = [
-    { name = "Gareth", email = "gareth.w.owen@gmail.com" }
+    { name = "Gareth Owen", email = "gareth.w.owen@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = []

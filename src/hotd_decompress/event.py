@@ -8,11 +8,11 @@ BODY0 (DAT_00d5a5d0):
         section = opcode stream; 0xFFFFFFFF ends ENTB-style lists
         and (as the last word) the event itself.
 
-VM: DAT_00da0ab8 is the PC. Tick at 0x4c0db0 dispatches
+VM: DAT_00da0ab8 is the PC. Tick at `TickEventVm` (`0x4c0db0`) dispatches
 handlers[opcode] at 0x005eeac0. Names from exe strings at 0x5a3a00.
 
 CCTB (0x3c) queues a camera job; job 0x40 binds camALL group + frames
-(FUN_00460fd0). ENTB* operands are BODY offsets of spawn records.
+(`BindCameraRail` (`FUN_00460fd0`)). ENTB* operands are BODY offsets of spawn records.
 """
 
 from __future__ import annotations
@@ -191,9 +191,13 @@ class SpawnRecord:
     x: float | None = None
     y: float | None = None
     z: float | None = None
-    rx: float | None = None
-    ry: float | None = None
-    rz: float | None = None
+    """Integer full-circle angle words. `EvtOpEntb` (`FUN_0046e5c8`) copies
+    record `+0x14/+0x18/+0x1C` to entity `+0x34/+0x38/+0x3C`. Not IEEE floats
+    (`65536 = 360°`). Scene 002 uses `0xD000` / `0x3000`.
+    """
+    rx: int | None = None
+    ry: int | None = None
+    rz: int | None = None
     posMode: int | None = None
     unk22: int | None = None
     """Byte copied to entity+0xd4 (spawn event id)."""
@@ -210,7 +214,7 @@ class CameraBind:
     job: int
     jobName: str
     args: list[int]
-    """Present on job 0x40 (FUN_00460fd0)."""
+    """Present on job 0x40 (`BindCameraRail` (`FUN_00460fd0`))."""
     startFrame: int | None = None
     endFrame: int | None = None
     """camALL.rbh group index (0–141)."""
@@ -302,9 +306,9 @@ def parse_entb_record(body: bytes, offset: int) -> SpawnRecord | None:
         x=f32(body, offset + 8),
         y=f32(body, offset + 12),
         z=f32(body, offset + 16),
-        rx=f32(body, offset + 20),
-        ry=f32(body, offset + 24),
-        rz=f32(body, offset + 28),
+        rx=u32(body, offset + 20),
+        ry=u32(body, offset + 24),
+        rz=u32(body, offset + 28),
         posMode=body[offset + 0x20] & 3,
         unk22=u16(body, offset + 0x22),
         spawnEventId=body[offset + 0x24],
@@ -334,9 +338,9 @@ def parse_entbe_record(body: bytes, offset: int) -> SpawnRecord | None:
         x=f32(body, offset + 8),
         y=f32(body, offset + 12),
         z=f32(body, offset + 16),
-        rx=f32(body, offset + 20),
-        ry=f32(body, offset + 24),
-        rz=f32(body, offset + 28),
+        rx=u32(body, offset + 20),
+        ry=u32(body, offset + 24),
+        rz=u32(body, offset + 28),
         unk22=u16(body, offset + 0x20),
     )
 

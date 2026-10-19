@@ -2,7 +2,7 @@
 
 On-disk creature data is **pooled**, not one file per enemy. Names live in `THOTD.exe` motion strings and a 94-row type table. Mesh parts are `CREAT1.RBH` / `CREAT2.rbh` ids; skins are VVTP pages in `texture.VMC` / `B_*`.
 
-This note is **not** a CLI flag. Pair `-m` on the CREAT files with `-p` on a `.vmc`, then join through the exe tables below. Exploratory dumps live in `scripts/creature-map/` (not wired into `index.ts`). Decomp: `FUN_00418aa0` (load), `FUN_00419cac` (CREAT id table → `DAT_00d53080`), `FUN_00483ad0` (type → model id).
+This note is **not** a CLI flag. `scripts/creature_map.py` joins the exe tables below to CREAT `texPageId`s and `evtALL` spawns. Decomp: `LoadStageAssets` (`FUN_00418aa0`) (load), `LoadCreatMeshBank` (`FUN_00419cac`) (CREAT id table → `DAT_00d53080`), `ApplyCreatureTypeStats` (`FUN_00483ad0`) (type → model id).
 
 ## Files are banks
 
@@ -12,11 +12,11 @@ This note is **not** a CLI flag. Pair `-m` on the CREAT files with `-p` on a `.v
 | `CREAT2.rbh` | Same layout. 2677 ids, 1517 nodes. Ids **55–7498**. |
 | `texture.VMC` / `B_*` / `bigger.vmc` | One shared page bank. `B_RED`…`B_PURPL` are blood-colour remaps of the same 421 pages, not different species. |
 
-`FUN_00418aa0` always loads `ART\STAGE1\CREATURE\CREAT1.RBH`, then `CREAT2.RBH`, then `texture.VMC`. There is no per-chapter creature file.
+`LoadStageAssets` (`FUN_00418aa0`) always loads `ART\STAGE1\CREATURE\CREAT1.RBH`, then `CREAT2.RBH`, then `texture.VMC`. There is no per-chapter creature file.
 
 Each CREAT id is one **body-part node** (median ~20 verts), not a whole character. A creature is a skeleton of many ids.
 
-`FUN_00419cac` copies each CREAT id table into a global slot array:
+`LoadCreatMeshBank` (`FUN_00419cac`) copies each CREAT id table into a global slot array:
 
 ```
 for (id, nodePtr) in table until id == -1:
@@ -31,26 +31,30 @@ PE: image base `0x400000`. DGROUP starts at VA `0x5A0000` (file offset `0x187400
 
 | VA | Layout | Role |
 |----|--------|------|
-| `DAT_005d46ac` | 94 × `0x4C` | Per-type stats (model, HP, scale, default motion) |
+| `DAT_005d46ac` | 94 × `0x4C` | Per-type stats (model, hit radius, scale, default motion) |
 | `DAT_005efa58` | 94 × `s32` | Bone count |
 | `DAT_005ef8e0` | 94 × pointer | Skeleton root (bone tree) |
+| `DAT_005efbd0` | 674 × pointer | `MO_*` clip bases — [motion.md](motion.md) |
+| `DAT_005f0658` | 674 × `s32` | Clip frame counts |
 | `DAT_005f1258` | 674 × pointer | `MO_*` motion name strings |
 
-Ghidra often reads the 16-bit type at `entity+0xd4` as `*(int*)(entity+0xd2) >> 16`. Motion id is the 16-bit at `+0xd8` (`>> 16` of `+0xd6`).
+**94 skeleton-backed types are not every actor.** `BindSpawnEventType` (`FUN_0047b2c4`) / `ApplyCreatureTypeStats` (`FUN_00483ad0`) index the `0x4C` stride with no visible 94-entry bounds check. Stage 1 has ten slot-128 occurrences with selector **107**; that row has model 0, radius 0, scale 1 and is a controller/special type, not permission to walk past the 94-entry skeleton arrays. Thirteen of the 94 trees also reference a CREAT id absent from both banks — some handlers reject selectors, some nodes are conditional. Keep the declared bone stride even when a walk finds fewer nodes (types 41/42/43/44/46/66 have 12 reachable nodes on an 18-bone stride; type 91 has 16/18).
+
+Ghidra often reads the 16-bit type at `entity+0xd4` as `*(int*)(entity+0xd2) >> 16`. Motion id is the 16-bit at `+0xd8` (`>> 16` of `+0xd6`). Do not model `+0xd4` and that overlapping load as two independent simultaneous fields without tracing lifetimes.
 
 ### Type row (`0x4C`)
 
 ```
 offset  size  field
 0x00    4     u32 modelId     root / display id (may be absent from CREAT; bones have the real ids)
-0x14    4     f32 hitRadius   copied to entity+0x98; gun sphere in FUN_00414aac (not combat HP)
+0x14    4     f32 hitRadius   copied to entity+0x98; gun sphere in `SphereHitTest` (`FUN_00414aac`) (not combat HP)
 0x28    4     f32 scale
 0x2C    4     f32 yOffset
 0x30    4     f32 (extra)
 0x44    4     u32 defaultMotion   index into DAT_005f1258
 ```
 
-`FUN_00483ad0` copies `+0x00` → `entity+0x5c` (model id), `+0x14` → `+0x98` (hit-sphere radius), `+0x28` → `+0x9c` (scale). Combat HP is the ENTB u16 at record `+0x22` → `entity+0x78` — [enemy-systems.md](enemy-systems.md).
+`ApplyCreatureTypeStats` (`FUN_00483ad0`) copies `+0x00` → `entity+0x5c` (model id), `+0x14` → `+0x98` (hit-sphere radius), `+0x28` → `+0x9c` (scale). Combat HP is the ENTB u16 at record `+0x22` → `entity+0x78` — [enemy-systems.md](enemy-systems.md).
 
 `defaultMotion` is often a **shared idle** (`MO_b3_pose_2`, `MO_b1_atk_a`), not the species walk set. Species clips (`MO_ebitb_*`, `MO_k_*`, …) are selected at runtime by AI, so type index → Ebitan/Kageo is **not** a single column.
 
@@ -65,7 +69,7 @@ offset  size  field
 0x1C    4×N   child pointers
 ```
 
-Walk only `+0x00` as the mesh id and `+0x1C` for `childCount` children. Treating every word as an id pulls in unrelated meshes (including id 0 → page 589).
+Walk only `+0x00` as the mesh id and `+0x1C` for `childCount` children. Treating every word as an id pulls in unrelated meshes (including id 0 → page 589). `+0x14` indexes the per-bone `s16` triplet in a `MO_*` frame ([motion.md](motion.md)).
 
 Union of those mesh ids, then OBJ `usemtl page_N`, is the type’s skin set.
 
@@ -115,7 +119,7 @@ Page 18 is a sprite page, not a creature skin.
 
 ## Official roster → engine types
 
-Sega names and A–G codes from the Saturn manual / Curien report. Engine types from `DAT_005d46ac` + CREAT skeleton pages + slot-128 `spawnEventId` (that field *is* the type for `FUN_0047b2c4`). Default motions are often a shared idle (`MO_b3_pose_2`); species clips live in the 674-name `MO_*` list.
+Sega names and A–G codes from the Saturn manual / Curien report. Engine types from `DAT_005d46ac` + CREAT skeleton pages + slot-128 `spawnEventId` (that field *is* the type for `BindSpawnEventType` (`FUN_0047b2c4`)). Default motions are often a shared idle (`MO_b3_pose_2`); species clips live in the 674-name `MO_*` list.
 
 | Sega | Name | Chapters | Type(s) | Conf. | Evidence |
 |------|------|----------|---------|-------|----------|
@@ -148,7 +152,9 @@ Sega names and A–G codes from the Saturn manual / Curien report. Engine types 
 | Type 0 | **Magician** | 4 | **51** | high | `MO_boss4_*`; grey bald page 569; radius 12 |
 | NPC | **Goldman** | story | **2** | high | Brown coat, glasses, DBR badge; scale 1.4 |
 | NPC | Scientists / civilians | 1–4 | 17, 19–28, 49, 65, 89 | high | Lab-coat page 551 cluster; civilian 552+568 |
-| NPC | Rogan / G / Sophie / Curien | story | — | — | `MO_p_*`, `MO_tom_*`, `MO_mrg_*`, `MO_synd_demo` |
+| NPC | Rogan / G / Sophie / Curien | story | — | — | Single CREAT meshes from `DAT_005ce368` (Sophie = id **7482**, pages 559+560, scale 1.2). Clips `MO_p_*`, `MO_tom_*`, `MO_mrg_*`, `MO_synd_demo` exist but have no type-row skeleton. |
+
+`DAT_005ce368` slot 5 ("Researcher", CREAT id **7483**, scale 0.8) is **not a character mesh**. Its 17 verts split into two mirrored clusters, and the UV patch on page 566 is a small ring (a lens), not skin. The name in the story-NPC table does not mean the CREAT id is a full body.
 
 ## Type → page (all 94)
 
@@ -160,32 +166,36 @@ High-confidence rows:
 |-----:|-------|------:|---:|------:|----------------|
 | 1 | 582, 585 | 16 | 8 | 0.5 | **Saruzou** |
 | 2 | 560, 565, 571 | 20 | 5 | 1.4 | **Goldman** |
-| 6 | 554 | 10 | 7 | 1.0 | **Hangedman** (slots 35/36 write this) |
+| 6 | 554 | 10 | 7 | 1.0 | **Hangedman** (slots 35/36 write this; default motion is Hermit `MO_b3_atk_l`, posed ref is motion 22) |
 | 16 | 556 | 18 | 2 | 1.5 | **Sam** (`zonbiman`) |
 | 17, 19–21, 24, 49 | 551 | 18–20 | ~5–8 | 1.0 | DBR lab-coat scientists |
 | 18 | 563 | 16 | 9 | 1.0 | **Cyril** |
-| 35 / 36 | 547–549 | 18 | 1.8 / 8 | 0.5 / 1.0 | **Chariot** |
+| 35 / 36 | 35: 547–549, 576; 36: 548–549 | 18 | 1.8 / 8 | 0.5 / 1.0 | **Chariot** |
 | 51 | 569 | 18 | 12 | 1.0 | **Magician** |
 | 64 | 561, 562, 591 | **28** | 2.6 | 1.0 | **Hermit** |
 | 76 | 557, 558 | 16 | 2.8 | 1.2 | **Devilon** |
 | 83 | 574 | 18 | 2.5 | 1.0 | **Drake** (`MO_dr_l_nage`) |
 
+Hangedman's skeleton is a chain, not a biped: root part `1078` branches into a 5-link run (`1080→1082→1084→1086→1088`, each offset `+1.30` in local Z) plus a shorter branch (`1076→1092→1090`). Do not map type-6 bone ids onto arms, legs, or a head without checking each mesh. Species clips are `MO_b2_*`; the type-row default `MO_b3_atk_l` is a shared Hermit idle.
+
 Medium / notable variants: 3–4 Kageo family (page 550); 7 Hangedman body (554+576); 8 Hangedman-sized Stage 02 (radius 12.5); 11 Neil/swamp mix; 23/25–27 civilians (552+568); 38 flying/Hangedman (558+569); 71/73 C-type (578); 82 Simon (573); 84 Drake/Parlor (`MO_dr_knif_chaku`); 87 Ebitan (575+583); 91 Sam variant (556+576).
 
 Type 0 is an all-zero template (bones still 21). Types 5, 10, 39, 44, 52, 66, 75 have **no** VVTP pages on the skeleton walk — 75 (9 bones, scale 0.5) and 60 (scale 0.25) are the best animal/insect candidates.
 
-There are 94 types. Many are clothing/damage/LOD variants that share a page set. Gilmore, Harris, Robert, Rubin, Moody, Kenfis, Bouere, Murrer, Name, Taran, and the player/Sophie/Curien meshes still have motion sets but no unique type-row default.
+There are 94 types. Many are clothing/damage/LOD variants that share a page set. Gilmore, Harris, Robert, Rubin, Moody, Kenfis, Bouere, Murrer, Name, Taran, and Curien still have motion sets but no unique type-row default. Sophie / Rogan / G story meshes are the character table at `DAT_005ce368` (not the 94-row type table): slot 4 is Sophie, CREAT id 7482.
 
 ## How to reproduce
 
-1. `-m` on `CREAT1.RBH` and `CREAT2.rbh` → `ids.json` + `node_*.obj`.
-2. `-p` on `B_RED.VMC` (or `bigger.vmc`) → `page_XXXX.png`.
-3. `-e` on `evtALL.rbh` → `events.json` (spawn `typeId` / `spawnEventId`).
-4. `bun run scripts/creature-map/hotd-creature-map.ts` — dump the 94 type rows, spawn-fn table (`DAT_005d8118`), and event usage from `THOTD.exe`.
-5. `bun run scripts/creature-map/hotd-creature-clusters.ts` — cluster types by VVTP pages; histogram `spawnEventId`.
-6. `bun run scripts/creature-map/hotd-more.ts` — extra type rows 94–127 and slot-128 prolog.
-7. `bun run scripts/creature-map/hotd-hp.ts` — high-HP spawns and Stage 03/04 slot usage.
+`scripts/creature_map.py` reads `THOTD.exe` and the retail files under `assets/` (`CREAT1.RBH`, `CREAT2.rbh`, `evtALL.rbh`, `B_RED.VMC`). Skin pages are the CREAT `texPageId`s on the skeleton walk, so a prior `-m` / `-p` / `-e` run is not required.
 
-To join a type to a skin by hand: walk `DAT_005ef8e0[type]`, collect `meshId`s, look up OBJ `usemtl page_N`.
+Exe: `HOTD_EXE`, else `hotd-exe/THOTD.exe`, else `../typescript/hotd-decompress/hotd-exe/THOTD.exe`. Assets: `HOTD_ASSETS` or `assets/`.
 
-JSON from those scripts lands under `decompressed_assets/exe_tables/` (`creature-map.json`, `creature-clusters.json`) alongside the older `types.json` / `motions.json` / `mapping.json`. All gitignored, not a CLI output.
+1. `uv run python scripts/creature_map.py` — 94 type rows, skeleton mesh ids, CREAT page sets, spawn-fn table (`DAT_005d8118`), and evtALL usage. Writes `decompressed_assets/exe_tables/creature-map.json`.
+2. `uv run python scripts/creature_map.py clusters` — group types by page set; histogram `spawnEventId`; list callers of `ApplyCreatureTypeStats` (`FUN_00483ad0`). Writes `creature-clusters.json`.
+3. `uv run python scripts/creature_map.py more` — type rows 94–127 and the slot-128 prolog.
+4. `uv run python scripts/creature_map.py hp` — spawns with `unk22 >= 10`, Stage 03/04 slot usage, slot 128 by `spawnEventId`.
+5. `sample_motion_frame` in `src/hotd_decompress/motion.py` — one `MO_*` frame (Hangedman reference: motion 22, frame 0, 10 bones). See [motion.md](motion.md).
+
+To join a type to a skin by hand: walk `DAT_005ef8e0[type]`, collect `meshId`s, look up that CREAT node's `usemtl page_N`.
+
+JSON from the runner lands under `decompressed_assets/exe_tables/` (`creature-map.json`, `creature-clusters.json`). Gitignored, not a CLI output.

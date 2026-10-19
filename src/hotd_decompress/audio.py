@@ -1,7 +1,7 @@
 """
 HotD / Tantalus digital SFX in sound/*.rbh (not CD audio).
 
-Engine init (FUN_00411f10): 11025 Hz, 8-bit; mixer has 3 voices.
+Engine init (`InitSoundMixer` (`FUN_00411f10`)): 11025 Hz, 8-bit; mixer has 3 voices.
 Oneshoot O_*.rbh BODY:
   +0x00 u32 0x00082c30
   +0x04 u16 0x0002
@@ -25,7 +25,7 @@ from hotd_decompress.binary import u16, u32
 from hotd_decompress.piff import PiffFile, Source, decompress_piff, load_piff
 from hotd_decompress.wav import encode_wav_pcm8_mono
 
-"""Matches FUN_00411f10 `_DAT_00c721e4 = 0x2b11`."""
+"""Matches `InitSoundMixer` (`FUN_00411f10`) `_DAT_00c721e4 = 0x2b11`."""
 SOUND_SAMPLE_RATE = 0x2B11
 
 """Oneshoot BODY magic / gamesnds external-offset sentinel."""

@@ -1,6 +1,6 @@
 # Meshes (`world*.rbh`, `CREAT*.rbh`)
 
-Stage geometry and creature models share one RBHF layout: a pointer graph plus a float3 vertex pool. Prim batches match `FUN_00578bb0`. Load path: `FUN_00419cac` / `FUN_00419cf4` → `FUN_005769c0`.
+Stage geometry and creature models share one RBHF layout: a pointer graph plus a float3 vertex pool. Prim batches match `DispatchMeshPrims` (`FUN_00578bb0`). Load path: `LoadCreatMeshBank` (`FUN_00419cac`) / `LoadWorldMeshBank` (`FUN_00419cf4`) → `LoadPiffRbh` (`FUN_005769c0`).
 
 ## Container
 
@@ -69,7 +69,7 @@ Then:
 
 `vertBase / 12` is the first vertex this node uses. Prim indices are **local** to that slice (index 0 = `pool[vertBase/12]`).
 
-## Prim batches (`FUN_00578bb0`)
+## Prim batches (`DispatchMeshPrims` (`FUN_00578bb0`))
 
 A node is followed by zero or more batches until `count == 0` (or a negative `sizeShorts`).
 
@@ -120,13 +120,13 @@ UVs are **pixel coordinates** on a 256×256 VVTP page (`MESH_PAGE_SIZE`). `texPa
 ## How the tool works
 
 ```text
-bun run index.ts -m|--mesh <file.rbh> [outdir]
+uv run hotd-decompress -m|--mesh <file.rbh> [outdir]
 ```
 
-`convertMeshesToObj` (`src/mesh.ts`) uses `loadRbh` — **no PACK expand**. Retail `world*.rbh` / `CREAT*.rbh` are already BODY.
+`convert_meshes_to_obj` (`src/hotd_decompress/mesh.py`) uses `load_rbh` — **no PACK expand**. Retail `world*.rbh` / `CREAT*.rbh` are already BODY.
 
-1. `isMeshRbh`: ≥2 header rows, flags `2` then `0`, BODY1 size `% 12 == 0`.
-2. `detectKind`: try creat id table (`id == -1` terminator), else world (`id == 0`).
+1. `is_mesh_rbh`: ≥2 header rows, flags `2` then `0`, BODY1 size `% 12 == 0`.
+2. `detect_kind`: try creat id table (`id == -1` terminator), else world (`id == 0`).
 3. Unique node offsets from the id table, sorted; parse each node’s batches.
 4. Default dir: `decompressed_assets/<stem>_mesh/`.
 
@@ -142,6 +142,10 @@ OBJ details:
 - untextured faces: `usemtl none` after a textured run
 - comment lines for position (world) and scale
 
+`ids.json` follows `jsonutil.write_json` (whole floats print as `n.0`). OBJ `v` / `vt` lines use the same number text for non-integers, so a tiny value can be scientific (`4.6e-05`). The TypeScript port prints a long decimal for that same float. Topology and UV counts match.
+
 Stdout: `kind`, id count, node count, files written.
 
 Pair OBJ materials with `-p` on the matching `.vmc` (`page_XXXX.png`). CREAT ids are body parts; the exe type table and skeleton trees that group them into named creatures are in [creatures.md](creatures.md).
+
+`-m` writes every prim as an OBJ face (quads stay 4-gons). A dump of many **CREAT** nodes is a spike ball because the engine submits one bone mesh per frame ([game-rendering.md](game-rendering.md), [motion.md](motion.md)), not because the node bytes are wrong. World quads are strip-ordered; fanning `(0,1,2)+(0,2,3)` bowties them. CREAT quads are perimeter order and that fan is the exe split.
