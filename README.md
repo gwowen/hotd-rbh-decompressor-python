@@ -59,6 +59,20 @@ uv run hotd-decompress -s assets/sprite/spr.rbh
 # Decompress event scripts / camera rails to JSON
 uv run hotd-decompress -e assets/evt/allstage/evtALL.rbh
 uv run hotd-decompress -c assets/cam/allstage/camALL.rbh
+
+# One-shot: every typed asset under assets/ → decompressed_assets/
+uv run hotd-decompress --all
+uv run hotd-decompress --all assets decompressed_assets
+
+# One type for the whole tree (or a subdirectory)
+uv run hotd-decompress -p --all
+uv run hotd-decompress -w --all
+uv run hotd-decompress -m --all assets/art
+uv run hotd-decompress -s --all
+uv run hotd-decompress -e --all
+uv run hotd-decompress -c --all
+uv run hotd-decompress -d --all          # packed PIFF only (skips BODY-only files)
+uv run hotd-decompress -p assets/art     # directory → all .vmc under it
 ```
 
 `uv run python -m hotd_decompress` is equivalent to `uv run hotd-decompress`.
@@ -74,6 +88,9 @@ uv run hotd-decompress -c assets/cam/allstage/camALL.rbh
 | `-s` / `--sprites` | Decompress `spr.rbh` metadata to `sprites.json` |
 | `-e` / `--evt` | Decompress event script bank to `events.json` (opcodes, spawns, camera binds) |
 | `-c` / `--cam` | Decompress camera rail bank to `cameras.json` |
+| `-a` / `--all` | Walk `assets/` (or a directory) and decode every matching file. Combine with a type flag (`-p --all`) to limit to one kind. A type flag given a directory does the same walk. |
+
+`--all` uses the same per-file output names as the single-file flags (`<stem>_png/`, `<stem>_wav/`, …). It does **not** write `.decomp.*` PIFF unless you pass `-d --all` (typed flags already expand `PACK` in memory). `TEXTURE.VMC` stubs and already-unpacked files are skipped.
 
 `--png` writes `page_XXXX.png` (one file per texture page id). `spr.rbh` is sprite metadata only — decompress a `.vmc` bank for pixels.
 
@@ -132,7 +149,8 @@ All are PIFF form `VVTP` (256×256 RGB555 pages):
 ## Layout
 
 ```
-src/hotd_decompress/cli.py     CLI
+src/hotd_decompress/cli.py     CLI (including --all batch)
+src/hotd_decompress/discover.py Walk assets/ and classify by decode kind
 src/hotd_decompress/piff.py    PIFF load / serialize / PACK→BODY decompress
 src/hotd_decompress/pack.py    PACK hunk unpack
 src/hotd_decompress/lz.py      Tantalus LZ

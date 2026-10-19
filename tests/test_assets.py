@@ -15,6 +15,7 @@ from hotd_decompress.rbh import inspect_rbh
 from hotd_decompress.sprite import extract_sprites
 from hotd_decompress.texture import extract_texture_pages, texture_page_to_rgba
 from tests.helpers import (
+    ASSETS,
     TS_ROOT,
     asset,
     decode_png_rgba,
@@ -51,7 +52,50 @@ def test_decompress_b_red_byte_identical_to_bun(tmp_path: Path) -> None:
 
 
 @requires_assets
-def test_inspect_evt_and_spr() -> None:
+def test_discover_classifies_retail_tree() -> None:
+    from hotd_decompress.discover import files_for_kinds
+
+    assert ASSETS is not None
+    grouped = files_for_kinds(ASSETS, ["png", "wav", "mesh", "sprites", "evt", "cam"])
+    png_names = {p.name.lower() for p in grouped["png"]}
+    assert png_names >= {"b_red.vmc", "bigger.vmc", "texture.vmc"}
+    assert len(grouped["png"]) == 7
+    assert any(p.name.lower() == "gamesnds.rbh" for p in grouped["wav"])
+    assert any(p.name.lower() == "o_help.rbh" for p in grouped["wav"])
+    mesh_stems = {p.stem.lower() for p in grouped["mesh"]}
+    assert "world1" in mesh_stems
+    assert "creat1" in mesh_stems
+    assert len(grouped["mesh"]) == 8
+    assert len(grouped["sprites"]) == 1
+    assert len(grouped["evt"]) == 1
+    assert len(grouped["cam"]) == 1
+
+
+@requires_assets
+def test_cli_evt_all(tmp_path: Path) -> None:
+    from hotd_decompress.cli import main
+
+    assert main(["-e", "--all", str(ASSETS), str(tmp_path)]) == 0
+    assert (tmp_path / "evtALL_evt" / "events.json").is_file()
+
+
+@requires_assets
+def test_cli_type_directory(tmp_path: Path) -> None:
+    from hotd_decompress.cli import main
+
+    assert main(["-s", str(asset("sprite")), str(tmp_path)]) == 0
+    assert (tmp_path / "spr_spr" / "sprites.json").is_file()
+
+
+@requires_assets
+def test_cli_decompress_all_skips_unpacked(tmp_path: Path, capsys) -> None:
+    from hotd_decompress.cli import main
+
+    evt_dir = asset("evt")
+    assert main(["-d", "--all", str(evt_dir), str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "skipped" in out
+    assert not any(tmp_path.glob("*.decomp.*"))
     evt = inspect_rbh(asset("evt/allstage/evtALL.rbh"))
     assert evt.bodyCount == 1
     assert "RBH:" in evt.description

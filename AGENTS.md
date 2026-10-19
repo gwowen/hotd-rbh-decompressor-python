@@ -43,7 +43,8 @@ CD music is MCI `cdaudio` in the exe and is **not** in `assets/sound/`.
 | `src/hotd_decompress/event.py` | `evtALL.rbh` stage/scene/section scripts; opcode + spawn + CCTB JSON decode |
 | `src/hotd_decompress/camera.py` | `camALL.rbh` Hermite rail tracks; JSON decode |
 | `src/hotd_decompress/binary.py` | Shared little-endian readers / 4-char tags |
-| `src/hotd_decompress/cli.py` | CLI flags and default output paths |
+| `src/hotd_decompress/discover.py` | Walk `assets/` and classify files by decode kind |
+| `src/hotd_decompress/cli.py` | CLI flags, `--all` batch, and default output paths |
 
 ## Asset facts (do not reverse incorrectly)
 
@@ -73,6 +74,9 @@ uv run hotd-decompress -m|--mesh <file.rbh> [outdir]      # decompress mesh → 
 uv run hotd-decompress -s|--sprites <file.rbh> [outdir]   # decompress spr.rbh → JSON
 uv run hotd-decompress -e|--evt <file.rbh> [outdir]       # decompress events → JSON
 uv run hotd-decompress -c|--cam <file.rbh> [outdir]       # decompress cameras → JSON
+uv run hotd-decompress --all|-a [assets_dir] [out_root]   # decode every typed asset
+uv run hotd-decompress -p|--png --all [assets_dir] [out]  # one type for the whole tree
+# (same --all form for -d / -w / -m / -s / -e / -c; a type flag + directory also walks)
 ```
 
 Default outputs:
