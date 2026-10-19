@@ -126,7 +126,7 @@ def serialize_piff(form: str, chunks: list[tuple[str, bytes]]) -> bytes:
 
 def decompress_piff(file: PiffFile) -> DecompressPiffResult:
     """
-    Expand PACK chunks to BODY (FUN_00410e68 unpack path).
+    Expand PACK chunks to BODY (`UnpackPackToBody` (`FUN_00410e68`) unpack path).
     Already-uncompressed BODY/other chunks are passed through.
     """
     chunks: list[DecompressedChunk] = []

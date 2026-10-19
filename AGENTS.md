@@ -16,7 +16,7 @@ This tree is a port of the Bun/TypeScript CLI (`../typescript/hotd-decompress`).
 
 Behaviour and layouts come from the TypeScript port and `hotd-decomp/THOTD-exe-commented.c` in the sibling TypeScript tree (e.g. PACK/LZ, VVTP pages, blood-colour remapping, sound init / `sound\O_%s.rbh` requests). Prefer verifying against that decomp over inventing format variants.
 
-CD music is MCI `cdaudio` in the exe and is **not** in `assets/sound/`.
+CD music is MCI `cdaudio` in the exe and is **not** in `assets/sound/`. `SNDON` kind 3 still requests a track (`PlayCdAudioTrack` (`FUN_00565d60`)).
 
 ## Hard constraints
 
@@ -32,18 +32,23 @@ CD music is MCI `cdaudio` in the exe and is **not** in `assets/sound/`.
 |--------|----------------|
 | `src/hotd_decompress/piff.py` | Load/serialize PIFF; **decompress** `PACK` → `BODY` |
 | `src/hotd_decompress/pack.py` | `u16 unc` / `u16 cmp` / LZ payload hunks |
-| `src/hotd_decompress/lz.py` | Signed varint + LZ back-refs (`FUN_00410d3c` family) |
+| `src/hotd_decompress/lz.py` | Signed varint + LZ back-refs (`LzDecompressHunk` (`FUN_00410d3c`) family) |
 | `src/hotd_decompress/rbh.py` | RBHF summary: RBHH, BODY, RELC, pointer roots |
 | `src/hotd_decompress/texture.py` | Detect/parse VVTP RGB555 pages; PNG decode |
 | `src/hotd_decompress/png.py` | Minimal PNG writer used by texture decode |
 | `src/hotd_decompress/audio.py` | Sound RBH parse (`O_*`, `gamesnds`); WAV decode |
 | `src/hotd_decompress/wav.py` | Minimal PCM WAV writer used by audio decode |
-| `src/hotd_decompress/mesh.py` | World/CREAT mesh parse (`FUN_00578bb0` prims); OBJ decode |
+| `src/hotd_decompress/mesh.py` | World/CREAT mesh parse (`DispatchMeshPrims` (`FUN_00578bb0`) prims); OBJ decode |
 | `src/hotd_decompress/sprite.py` | `spr.rbh` UV/page frame table; JSON decode |
 | `src/hotd_decompress/event.py` | `evtALL.rbh` stage/scene/section scripts; opcode + spawn + CCTB JSON decode |
-| `src/hotd_decompress/camera.py` | `camALL.rbh` Hermite rail tracks; JSON decode |
+| `src/hotd_decompress/camera.py` | `camALL.rbh` Hermite rail tracks; JSON decode; `sample_track` |
+| `src/hotd_decompress/rail_timeline.py` | CCTB job-`0x40` windows; `startFrame == -1` resolution (not a CLI flag) |
+| `src/hotd_decompress/creature_map.py` | Exe type/spawn tables joined to CREAT pages and evtALL (not a CLI flag) |
+| `src/hotd_decompress/motion.py` | Exe `MO_*` clip frame sampler (not a CLI flag) |
+| `src/hotd_decompress/sound_table.py` | Exe `DAT_005cbda8` sound-request rows (not a CLI flag) |
 | `src/hotd_decompress/binary.py` | Shared little-endian readers / 4-char tags |
-| `src/hotd_decompress/cli.py` | CLI flags and default output paths |
+| `src/hotd_decompress/discover.py` | Walk `assets/` and classify files by decode kind |
+| `src/hotd_decompress/cli.py` | CLI flags, `--all` batch, and default output paths |
 
 ## Asset facts (do not reverse incorrectly)
 
@@ -54,11 +59,11 @@ CD music is MCI `cdaudio` in the exe and is **not** in `assets/sound/`.
   - `bigger.vmc` = uncompressed `BODY` bank (same page count; not byte-identical to a decompressed `B_*`).
   - `TEXTURE.VMC` = game load path; may be a stub in this tree.
 - Texture clear colours: `0x0000` and `0x8421`. Format is RGB555 (+ `0x8000` bit as in engine).
-- Digital SFX under `assets/sound/` (exe init `FUN_00411f10`: 11025 Hz, 8-bit; 3 mixer voices — not channel count in the files):
+- Digital SFX under `assets/sound/` (exe init `InitSoundMixer` (`FUN_00411f10`): 11025 Hz, 8-bit; 3 mixer voices — not channel count in the files):
   - `O_*.rbh` — oneshoot: RBHH `flags=0`, one `BODY`. Header `u32 0x00082c30`, `u16 2`, `u16 soundId`, then unsigned 8-bit mono PCM (silence ≈ `0x80`).
   - `gamesnds.rbh` — bank: RBHH `flags=2` then `0` → 0x28-byte index entries + sample `BODY`. Embedded rows use `+0x18` as sample offset; external rows use `+0x18 == 0x00082c30` and `+0x14` as `O_*` soundId (WAV export resolves siblings in the same directory).
   - These sound RBHs are already uncompressed (`BODY` only; no `PACK`).
-- Mesh RBHs (`world*.rbh`, `CREAT*.rbh`): RBHH flags `2,0,0` → BODY0 graph + BODY1 float3 verts (+ empty BODY2). Creat id table is 8-byte entries until `id == -1`; world is `{id, flag, nodePtrs…, 0}` until `id == 0`. Prim batches: `flags & 0x2007` selects plain/textured tri/quad (`FUN_00578bb0`). World node `+0x20` XYZ is metadata — verts are already stage-space (do not bake as a translate).
+- Mesh RBHs (`world*.rbh`, `CREAT*.rbh`): RBHH flags `2,0,0` → BODY0 graph + BODY1 float3 verts (+ empty BODY2). Creat id table is 8-byte entries until `id == -1`; world is `{id, flag, nodePtrs…, 0}` until `id == 0`. Prim batches: `flags & 0x2007` selects plain/textured tri/quad (`DispatchMeshPrims` (`FUN_00578bb0`)). World node `+0x20` XYZ is metadata — verts are already stage-space (do not bake as a translate).
 - `evtALL.rbh` / `camALL.rbh`: single `flags=2` BODY pointer graphs. Camera tracks are `{u16 keyCount, u16 channelId}` + Hermite keys `{t, value, slopeIn, slopeOut}`.
 
 ## CLI contract
@@ -73,6 +78,9 @@ uv run hotd-decompress -m|--mesh <file.rbh> [outdir]      # decompress mesh → 
 uv run hotd-decompress -s|--sprites <file.rbh> [outdir]   # decompress spr.rbh → JSON
 uv run hotd-decompress -e|--evt <file.rbh> [outdir]       # decompress events → JSON
 uv run hotd-decompress -c|--cam <file.rbh> [outdir]       # decompress cameras → JSON
+uv run hotd-decompress --all|-a [assets_dir] [out_root]   # decode every typed asset
+uv run hotd-decompress -p|--png --all [assets_dir] [out]  # one type for the whole tree
+# (same --all form for -d / -w / -m / -s / -e / -c; a type flag + directory also walks)
 ```
 
 Default outputs:

@@ -18,7 +18,7 @@ Every sequence the player watches is an **event section** (opcode stream) under 
 
 The engine does not switch to a movie player. `CHGSM` (change system mode) and `ATCMD` (attract-mode command) only poke globals; they do not load another container.
 
-CD music is MCI `cdaudio` in the exe. It is **not** in `assets/sound/` and is not keyed from `evtALL`. Digital voice / SFX in a sequence are `SNDON` → `FUN_00412000` (`O_*.rbh` / `gamesnds.rbh`).
+CD music is MCI `cdaudio` in the exe. It is **not** in `assets/sound/` and is not keyed from `evtALL`. Digital voice / SFX in a sequence are `SNDON` → `PlayDigitalSfx` (`FUN_00412000`) (`O_*.rbh` / `gamesnds.rbh`).
 
 ## Who owns the playhead
 
@@ -31,13 +31,13 @@ Packed bytes ([events-detailed.md](events-detailed.md)):
 | `DAT_00da0cf0` | EventNo (section index inside the scene) |
 | `DAT_00da0ab8` | PC (pointer into the event BODY) |
 
-Bind (`0x4c0d3c`):
+Bind (`BindEventPlayhead` (`0x4c0d3c`)):
 
 ```
 PC = stages[StageNo][SceneNo][EventNo]
 ```
 
-`FUN_00418aa0` (stage asset load) fills the 7500-slot mesh table, then requests `cam\allstage\camall.rbh` (`DAT_00d5a5c8`) and `evt\allstage\evtall.rbh` (`DAT_00d5a5d0`). World mesh path is `ART\STAGE%d\WORLD\WORLD_%d.RBH` with the same StageNo (clamped: slots 0–3 → stages 1–4; slots 4–5 → stage 5; slot 6 → 6; anything else → 1). Title / attract / ending scripts still run against whatever world that clamp loaded.
+`LoadStageAssets` (`FUN_00418aa0`) (stage asset load) fills the 7500-slot mesh table, then requests `cam\allstage\camall.rbh` (`DAT_00d5a5c8`) and `evt\allstage\evtall.rbh` (`DAT_00d5a5d0`). World mesh path is `ART\STAGE%d\WORLD\WORLD_%d.RBH` with the same StageNo (clamped: slots 0–3 → stages 1–4; slots 4–5 → stage 5; slot 6 → 6; anything else → 1). Title / attract / ending scripts still run against whatever world that clamp loaded.
 
 Debug UI names (`s_Stage_01_005ce918` / `PTR_s_Scene_000_005ceba4`):
 
@@ -50,21 +50,21 @@ Debug UI names (`s_Stage_01_005ce918` / `PTR_s_Scene_000_005ceba4`):
 | 7 | *(null)* | 0 | Unused. |
 | 8 | extra | 6 | Reachable if StageNo is set; copies late Stage 01 scenes. |
 
-`FUN_00422808` (stage-select) only counts until the first `0xFFFFFFFF`, so the UI sees slots 0–6. Gameplay indexes StageNo directly.
+`CountStagesForSelectUi` (`FUN_00422808`) (stage-select) only counts until the first `0xFFFFFFFF`, so the UI sees slots 0–6. Gameplay indexes StageNo directly.
 
 ## Per-frame playback
 
-Idle pump `FUN_00562e30` draws; gameplay tick `FUN_00458b7c` (from `FUN_00458720`) updates entities and camera **before** that draw. A scripted beat is four machines on the same frame:
+Idle pump `IdleFramePump` (`FUN_00562e30`) draws; gameplay tick `TickGameplay` (`FUN_00458b7c`) (from `TickGameplayParent` (`FUN_00458720`)) updates entities and camera **before** that draw. A scripted beat is four machines on the same frame:
 
 ```
 event VM tick          camera job ring           rail sampler              draw pump
-0x4c0db0               FUN_0045f414              FUN_004caa70              FUN_00568350
+TickEventVm            DispatchCameraJob         TickCameraRail            DrawEnabledCameras
 handlers[opcode]       DAT_005d8418[job]         six Hermite tracks        vtable +0x24
        │                      │                         │                        │
        ├─ CCTB 0x40 ──────────► bind group + [start,end]
        ├─ WAIT_CAMJOB ────────► yield until ring empty
        ├─ ENTB* ──────────────► spawn into DAT_00d53080 instances
-       └─ SNDON ──────────────► FUN_00412000
+       └─ SNDON ──────────────► PlayDigitalSfx
                                                         │
                                                         ├─ eye / look-at → yaw/pitch
                                                         ├─ plant player on floor
@@ -73,7 +73,7 @@ handlers[opcode]       DAT_005d8418[job]         six Hermite tracks        vtabl
 
 ### 1. Event VM
 
-Tick at `0x4c0db0`: `opcode = *PC`; `call handlers[opcode]` at `DAT_005eeac0`. Names at `0x5a3a00`.
+Tick at `TickEventVm` (`0x4c0db0`): `opcode = *PC`; `call handlers[opcode]` at `DAT_005eeac0`. Names at `0x5a3a00`.
 
 `DAT_00da0a98` is the yield flag. A wait op sets it and returns; the next frame retries the same opcode until the condition holds, then advances PC. That is how a cutscene **holds**: the script does not sleep the process; it spins on `WAIT_CAMJOB` / `WAIT_CAMFRM` / `WAIT_FRM` / `WAIT_ITEM` while the camera and entities keep ticking.
 
@@ -102,14 +102,14 @@ Retail `CHGSM` args (change system mode; 169 uses): **6** (69, scene-to-scene), 
 
 ### 2. Camera job ring
 
-`CCTB` queues the current instruction onto a 16-slot ring (`DAT_00d9f1f0`). `FUN_0045f414` reads `*(PC+4)` as the job type and dispatches `DAT_005d8418[job]`. Job `0x40` (`FUN_00460f88` → `FUN_00460fd0`) is the rail bind:
+`CCTB` queues the current instruction onto a 16-slot ring (`DAT_00d9f1f0`). `DispatchCameraJob` (`FUN_0045f414`) reads `*(PC+4)` as the job type and dispatches `DAT_005d8418[job]`. Job `0x40` (`BindCameraRailJob` (`FUN_00460f88`) → `BindCameraRail` (`FUN_00460fd0`)) is the rail bind:
 
 | Word | Copied to | Meaning |
 |------|-----------|---------|
 | start | `DAT_00d9ed04` | Start frame (`−1` keeps current `t`) |
 | end | `DAT_00d9ed08` | End frame (tick while `t < end`) |
 | camGroup | `DAT_00da0ca4` | `camALL.rbh` group index 0–141 |
-| flags | `DAT_00d9ed10` | Bit 1 (`2`) changes bind behaviour |
+| flags | `DAT_00d9ed10` | Bind flags. The update at `0x461171` tests mask **4**. Mask **2** is a different bit |
 
 Slot 0 of the 0x154-byte camera slots (`DAT_00da01c0`) also pokes the event-script state machine (`DAT_00da0ab0`). Remaining frames (`end − t`) live in `DAT_00da0bf8` (`WAIT_CAMFRM 0` / `RNWCJ` read that).
 
@@ -124,20 +124,20 @@ Gameplay often uses the same bind, then `WAIT_ENALV` so the rail and the fight o
 
 ### 3. Rail sampler
 
-`FUN_004caa70` (paused when `DAT_00da0a80 != 0` or `DAT_00da0b5c == 0`):
+`TickCameraRail` (`FUN_004caa70`) (paused when `DAT_00da0a80 != 0` or `DAT_00da0b5c == 0`):
 
 1. If `start < end`, increment the integer frame counter.
-2. Sample six Hermite tracks for group `DAT_00da0ca4` into eye XYZ (`DAT_00d9ed18`) and look-at XYZ (`DAT_00d9ed30`). Lookup is `FUN_00461858`; pose channels are **track order**, not `channelId`.
-3. `FUN_00461a30`: direction = eye − look-at → fixed-point yaw/pitch (×16). Roll = 0.
-4. `FUN_0048a15c`: raycast `(eye.x, 32768, eye.z)` onto the stage mesh. Player XZ follows the camera; Y comes from the ground hit.
+2. Sample six Hermite tracks for group `DAT_00da0ca4` into eye XYZ (`DAT_00d9ed18`) and look-at XYZ (`DAT_00d9ed30`). Lookup is `HermiteTrackLookup` (`FUN_00461858`); pose channels are **track order**, not `channelId`.
+3. `EyeLookAtToYawPitch` (`FUN_00461a30`): direction = eye − look-at → fixed-point yaw/pitch (×16). Roll = 0.
+4. `RaycastStageFloor` (`FUN_0048a15c`): raycast `(eye.x, 32768, eye.z)` onto the stage mesh. Player XZ follows the camera; Y comes from the ground hit.
 
-Zoom, 2P aim blend, and shake sit on top of the rail and do **not** add tracks ([cameras.md](cameras.md)). `DAT_00da0bd0` selects the live camera: `0` = gameplay (`FUN_00461adc`), `2` = title/alt (`FUN_00461b90`).
+Zoom, 2P aim blend, and shake sit on top of the rail and do **not** add tracks ([cameras.md](cameras.md)). `DAT_00da0bd0` selects the live camera: `0` = gameplay (`GameplayCameraView` (`FUN_00461adc`)), `2` = title/alt (`TitleCameraView` (`FUN_00461b90`)).
 
 ### 4. Draw
 
-Same path as any other frame ([game-rendering.md](game-rendering.md)): instance queues → `FUN_00578bb0` prims → software scanline or D3D `DrawIndexedPrimitive`. Sky (`SKYKD` / `SKYTB`), lights (`SHDWLT` / `WLTB`), and `TEXCHG` are event ops that only change globals the submit path reads. Letterbox bands (`FUN_0048769c`, height / `0x180`) and 2P split (`FUN_00487708`) are viewport helpers, not a movie overlay.
+Same path as any other frame ([game-rendering.md](game-rendering.md)): instance queues → `DispatchMeshPrims` (`FUN_00578bb0`) prims → software scanline or D3D `DrawIndexedPrimitive`. Sky (`SKYKD` / `SKYTB`), lights (`SHDWLT` / `WLTB`), and `TEXCHG` are event ops that only change globals the submit path reads. Letterbox bands (`SetLetterboxViewport` (`FUN_0048769c`), height / `0x180`) and 2P split (`SetSplitScreenViewport` (`FUN_00487708`)) are viewport helpers, not a movie overlay.
 
-`DAT_005cd35c != 0` skips 3D submit (load / fade). HUD stamps (`FUN_004434b0`) still run: stage-intro countdown `FUN_0051a8d0` is a **separate** entity state machine (voice / `SPR_Num` bonus / camera tilt) on top of the event script, not an opcode.
+`DAT_005cd35c != 0` skips 3D submit (load / fade). HUD stamps (`StampScrollSprite` (`FUN_004434b0`)) still run: stage-intro countdown `TickStageIntroCountdown` (`FUN_0051a8d0`) is a **separate** entity state machine (voice / `SPR_Num` bonus / camera tilt) on top of the event script, not an opcode.
 
 ## Special stages (title, attract, ending)
 
@@ -162,11 +162,11 @@ WAIT_FRM 9999
 NEXTEV
 ```
 
-`Scene 00` is a single `WAIT` — the VM yields forever. Title/attract UI mode 1 (`FUN_004210fc`) and title camera matrices (`FUN_00496f60`) sit beside this script; they are not encoded in `evtALL`.
+`Scene 00` is a single `WAIT` — the VM yields forever. Title/attract UI mode 1 (`TitleAttractUiMode1` (`FUN_004210fc`)) and title camera matrices (`TitleCameraMatrices` (`FUN_00496f60`)) sit beside this script; they are not encoded in `evtALL`.
 
 ### Stage adv (slot 5) — attract / demo reel
 
-One scene, 11 events. No `CHGSM`. Pattern: spawn a few `ENTB2`/`ENTB`/`ENTB3` actors, bind a rail, `WAIT_CAMJOB`, `WAIT_FRM`, `NEXTEV`. Rails used: groups **107–116** (plus 115 with a long 121–520 window). `SNDON 263` opens most beats. Attract/demo tick `FUN_00473e04` / `FUN_00458bd8` can restart or take coin/start; `ATCMD` from scripts is the event-side hook (14 uses, mostly in chapter scenes, not in `adv` itself).
+One scene, 11 events. No `CHGSM`. Pattern: spawn a few `ENTB2`/`ENTB`/`ENTB3` actors, bind a rail, `WAIT_CAMJOB`, `WAIT_FRM`, `NEXTEV`. Rails used: groups **107–116** (plus 115 with a long 121–520 window). `SNDON 263` opens most beats. Attract/demo tick `TickAttractDemo` (`FUN_00473e04`) / `TickAttractScroll` (`FUN_00458bd8`) can restart or take coin/start; `ATCMD` from scripts is the event-side hook (14 uses, mostly in chapter scenes, not in `adv` itself).
 
 ### Stage end (slot 6) — ending variants
 
@@ -190,13 +190,13 @@ These do **not** add tracks or opcodes. They run next to the VM:
 
 | System | Function | Behaviour |
 |--------|----------|-----------|
-| Title / attract UI mode 1 | `FUN_004210fc` | Main menu layout; optional stage-select `FUN_00422808` |
-| Attract/demo tick | `FUN_00473e04` | Demo input, stage restart, player-count transitions |
-| Attract scroll / difficulty | `FUN_00458bd8` / `FUN_00458c28` | Called from the gameplay tick |
-| Title camera matrices | `FUN_00496f60` | Fixed rotations for 1P vs 2P title layouts |
-| Live camera = title/alt | `DAT_00da0bd0 == 2` | `FUN_00461b90` instead of gameplay `FUN_00461adc` |
-| Stage-intro countdown | `FUN_0051a8d0` | HUD sprites + SFX; not an `evtALL` op |
-| Route playback (intro/wait/active) | `FUN_004c608c` | Sprite stamps for the route UI, not the 3D rail |
+| Title / attract UI mode 1 | `TitleAttractUiMode1` (`FUN_004210fc`) | Main menu layout; optional stage-select `CountStagesForSelectUi` (`FUN_00422808`) |
+| Attract/demo tick | `TickAttractDemo` (`FUN_00473e04`) | Demo input, stage restart, player-count transitions |
+| Attract scroll / difficulty | `TickAttractScroll` (`FUN_00458bd8`) / `TickAttractDifficulty` (`FUN_00458c28`) | Called from the gameplay tick |
+| Title camera matrices | `TitleCameraMatrices` (`FUN_00496f60`) | Fixed rotations for 1P vs 2P title layouts |
+| Live camera = title/alt | `DAT_00da0bd0 == 2` | `TitleCameraView` (`FUN_00461b90`) instead of gameplay `GameplayCameraView` (`FUN_00461adc`) |
+| Stage-intro countdown | `TickStageIntroCountdown` (`FUN_0051a8d0`) | HUD sprites + SFX; not an `evtALL` op |
+| Route playback (intro/wait/active) | `DrawRoutePlaybackUi` (`FUN_004c608c`) | Sprite stamps for the route UI, not the 3D rail |
 
 ## Reconstructing a sequence (this tool)
 

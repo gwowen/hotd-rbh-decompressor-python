@@ -2,38 +2,65 @@
 
 How *The House of the Dead* (PC / Tantalus) stores assets, and how this CLI decompresses them.
 
-Formats come from `hotd-decomp/THOTD-exe-commented.c` and the parsers in `src/`. All multi-byte integers are **little-endian**.
+Formats come from `hotd-decomp/THOTD-exe-named.c` / `THOTD-exe-commented.c` and the parsers in `src/hotd_decompress/`. All multi-byte integers are **little-endian**.
 
 This file is the combined form of the notes under `decompress-knowledge/`.
 
 ## Contents
 
+- [Reports](#reports)
 - [How the tool works](#how-the-tool-works)
 - [Two containers, many payloads](#two-containers-many-payloads)
 - [Asset map (on disk)](#asset-map-on-disk)
 - [PIFF container, PACK, and LZ](#piff-container-pack-and-lz)
-- [RBH / RBHF](#rbh--rbhf)
-- [Textures (VVTP / `.vmc`)](#textures-vvtp--vmc)
+- [RBH / RBHF](#rbh-rbhf)
+- [Textures (VVTP / `.vmc`)](#textures-vvtp-vmc)
 - [Audio (digital SFX)](#audio-digital-sfx)
 - [Meshes (`world*.rbh`, `CREAT*.rbh`)](#meshes-worldrbh-creatrbh)
-- [Creatures (exe types → CREAT ids → VVTP pages)](#creatures-exe-types--creat-ids--vvtp-pages)
+- [Creatures (exe types → CREAT ids → VVTP pages)](#creatures-exe-types-creat-ids-vvtp-pages)
+- [Motion clips (`THOTD.exe`)](#motion-clips-thotdexe)
 - [Sprites (`spr.rbh`)](#sprites-sprrbh)
 - [Events (`evtALL.rbh`)](#events-evtallrbh)
 - [Events in detail (VM, opcodes, spawns, cameras)](#events-in-detail-vm-opcodes-spawns-cameras)
 - [Cameras (`camALL.rbh`)](#cameras-camallrbh)
 - [Cutscenes (`THOTD.exe`)](#cutscenes-thotdexe)
+- [Cutscene audio cue sheet](#cutscene-audio-cue-sheet)
 - [Game rendering (`THOTD.exe`)](#game-rendering-thotdexe)
 - [Enemy spawn, AI, scoring, and collision (`THOTD.exe`)](#enemy-spawn-ai-scoring-and-collision-thotdexe)
 
+---
+
+## Reports
+
+Each note covers **on-disk layout** and **what the tool does** (modules, flags, output names). Exe functions are cited as `` `Name` (`FUN_00xxxxxx`) ``, matching `THOTD-exe-named.c`. Combined dump: [decompress-qwen.md](decompress-qwen.md).
+
+| File | Subject | Flag |
+|------|---------|------|
+| [piff.md](piff.md) | PIFF container, `PACK` hunks, Tantalus LZ | `-d` |
+| [rbh.md](rbh.md) | RBHF (`.rbh`) — headers, BODY, RELC, pointer graphs | *(inspect)* |
+| [textures.md](textures.md) | VVTP texture banks (`.vmc`) | `-p` |
+| [audio.md](audio.md) | Digital SFX (`O_*.rbh`, `gamesnds.rbh`) | `-w` |
+| [meshes.md](meshes.md) | Stage / creature meshes (`world*.rbh`, `CREAT*.rbh`) | `-m` |
+| [creatures.md](creatures.md) | Exe types → CREAT ids → VVTP pages (species map) | *(exe tables)* |
+| [motion.md](motion.md) | Exe `MO_*` clips + 3×4 bone playback | *(exe tables)* |
+| [sprites.md](sprites.md) | Sprite UV/page metadata (`spr.rbh`) | `-s` |
+| [events.md](events.md) | Event scripts (`evtALL.rbh`) | `-e` |
+| [events-detailed.md](events-detailed.md) | Event VM, opcodes, spawns, `CCTB` → `camALL` | `-e` |
+| [cameras.md](cameras.md) | Camera rails (`camALL.rbh`) | `-c` |
+| [cutscenes.md](cutscenes.md) | In-engine cutscene playback (evt + cam + draw) | *(exe runtime)* |
+| [cutscene-audio.md](cutscene-audio.md) | `SNDON` → `O_*` / `gamesnds` / CD cue join | *(exe table)* |
+| [game-rendering.md](game-rendering.md) | Exe draw path (backends, view, prims, VRAM) | *(exe runtime)* |
+| [enemy-systems.md](enemy-systems.md) | Spawn, AI, scoring, gun collision (`THOTD.exe`) | *(exe runtime)* |
+
 ## How the tool works
 
-`index.ts` is the only CLI. It never writes into `assets/` unless you pass an output path there. Defaults land under `decompressed_assets/` (gitignored).
+`src/hotd_decompress/cli.py` is the only CLI (`uv run hotd-decompress`). It never writes into `assets/` unless you pass an output path there. Defaults land under `decompressed_assets/` (gitignored).
 
 ```
 assets/  (read-only game files)
     │
     ▼
-index.ts  ── flag ──►  src/*.ts
+cli.py  ── flag ──►  src/hotd_decompress/*.py
     │
     ▼
 decompressed_assets/
@@ -41,19 +68,22 @@ decompressed_assets/
 
 | Flag | Module | What it does |
 |------|--------|----------------|
-| `-d` / `--decompress` | `src/piff.ts` + `pack.ts` + `lz.ts` | Expand every `PACK` → `BODY`, rewrite PIFF |
-| *(none)* `<file.rbh>` | `src/rbh.ts` | Print RBHH / BODY / PACK / RELC / pointer-root summary (no write) |
-| `-p` / `--png` | `src/texture.ts` + `png.ts` | Decompress PIFF, decode VVTP pages → PNG |
-| `-w` / `--wav` | `src/audio.ts` + `wav.ts` | Parse sound RBH → 8-bit mono WAV |
-| `-m` / `--mesh` | `src/mesh.ts` | Parse world/CREAT RBH → OBJ + `ids.json` |
-| `-s` / `--sprites` | `src/sprite.ts` | Parse `spr.rbh` → `sprites.json` |
-| `-e` / `--evt` | `src/event.ts` | Parse event graph + opcodes → `events.json` |
-| `-c` / `--cam` | `src/camera.ts` | Parse camera rails → `cameras.json` |
+| `-d` / `--decompress` | `src/hotd_decompress/piff.py` + `pack.py` + `lz.py` | Expand every `PACK` → `BODY`, rewrite PIFF |
+| *(none)* `<file.rbh>` | `src/hotd_decompress/rbh.py` | Print RBHH / BODY / PACK / RELC / pointer-root summary (no write) |
+| `-p` / `--png` | `src/hotd_decompress/texture.py` + `png.py` | Decompress PIFF, decode VVTP pages → PNG |
+| `-w` / `--wav` | `src/hotd_decompress/audio.py` + `wav.py` | Parse sound RBH → 8-bit mono WAV |
+| `-m` / `--mesh` | `src/hotd_decompress/mesh.py` | Parse world/CREAT RBH → OBJ + `ids.json` |
+| `-s` / `--sprites` | `src/hotd_decompress/sprite.py` | Parse `spr.rbh` → `sprites.json` |
+| `-e` / `--evt` | `src/hotd_decompress/event.py` | Parse event graph + opcodes → `events.json` |
+| `-c` / `--cam` | `src/hotd_decompress/camera.py` | Parse camera rails → `cameras.json` |
+| `-a` / `--all` | `src/hotd_decompress/discover.py` | Walk a tree and run the matching decoders |
 
 Two load paths:
 
-1. **PIFF decompress** (`loadPiff` → `decompressPiff`) — used by `-d`, `-p`, `-w`. Packed pages/clips become `BODY` in memory first.
-2. **RBHF parse** (`loadRbh`) — used by inspect, `-m`, `-s`, `-e`, `-c`. Expects `BODY` already (retail mesh/sprite/evt/cam files are uncompressed). Run `-d` first if you have a packed copy.
+1. **PIFF decompress** (`load_piff` → `decompress_piff`) — used by `-d`, `-p`, `-w`. Packed pages/clips become `BODY` in memory first.
+2. **RBHF parse** (`load_rbh`) — used by inspect, `-m`, `-s`, `-e`, `-c`. Expects `BODY` already (retail mesh/sprite/evt/cam files are uncompressed). Run `-d` first if you have a packed copy.
+
+JSON dumps (`ids.json`, `sprites.json`, `events.json`, `cameras.json`) go through `jsonutil.write_json`: indent 2, a trailing newline, unset optional dataclass fields omitted, and `NaN` / `Infinity` written as `null`. Whole floats print as `n.0` (`json.dumps`). The records match the TypeScript port; that port's `JSON.stringify` prints the same values as `n`.
 
 Default output names (`<stem>` = input filename without extension):
 
@@ -69,6 +99,25 @@ Default output names (`<stem>` = input filename without extension):
 
 Inspect with no path defaults to `assets/evt/allstage/evtALL.rbh`.
 
+### `--all` / directory walk
+
+`--all` / `-a` walks `.rbh` and `.vmc` under a root (default `assets`) and writes under an out root (default `decompressed_assets`). A type flag given a directory does the same walk (`uv run hotd-decompress -p assets/art`). Suffixes and names are matched case-insensitively.
+
+Bare `--all` runs the typed kinds only: png, wav, mesh, sprites, evt, cam. `-d` is included only with `-d --all` (or `-d` on a directory).
+
+`discover.matches_kind` classifies each file:
+
+| Kind | Match |
+|------|--------|
+| png | `.vmc` |
+| wav | parent directory `sound`, or name `gamesnds.rbh`, or name `O_*` |
+| mesh | stem `world*` or `creat*` |
+| sprites | name `spr.rbh`, or parent directory `sprite` |
+| evt | stem `evt*`, or parent directory `evt` |
+| cam | stem `cam*`, or parent directory `cam` |
+
+A file can match more than one kind. In a batch, these are skips: a `-d` file with no `PACK` chunk, a PNG with no pages, a WAV with no clips, and any `ValueError`. Any other exception fails the batch (exit 1). Single-file `-d` still writes a PIFF when the file has zero `PACK` chunks.
+
 ## Two containers, many payloads
 
 Every asset this tool reads is a **PIFF** file (RIFF-like, but **not** odd-size padded). The 4-byte form after the PIFF header selects the payload family:
@@ -80,24 +129,24 @@ Every asset this tool reads is a **PIFF** file (RIFF-like, but **not** odd-size 
 
 A compressed payload lives in a `PACK` chunk. After LZ expansion it is a `BODY` blob. Uncompressed files already store `BODY` and skip `PACK`.
 
-CD music is MCI `cdaudio` in the exe. It is **not** in `assets/sound/` and is not documented here.
+CD music is MCI `cdaudio` in the exe. It is **not** in `assets/sound/`. `SNDON` kind 3 still requests a track — [cutscene-audio.md](cutscene-audio.md).
 
 ## Asset map (on disk)
 
-| Path | Kind | Section |
-|------|------|---------|
-| `assets/art/stageN/world/worldN.rbh` | Stage geometry | [Meshes](#meshes-worldrbh-creatrbh) |
-| `assets/art/stage1/creature/CREAT*.rbh` | Creature meshes | [Meshes](#meshes-worldrbh-creatrbh), [Creatures](#creatures-exe-types--creat-ids--vvtp-pages) |
-| `assets/art/stage1/creature/*.vmc` | Creature texture banks | [Textures](#textures-vvtp--vmc), [Creatures](#creatures-exe-types--creat-ids--vvtp-pages) |
-| `assets/sprite/spr.rbh` | Sprite frame table | [Sprites](#sprites-sprrbh) |
-| `assets/evt/…` | Event scripts | [Events](#events-evtallrbh), [Events in detail](#events-in-detail-vm-opcodes-spawns-cameras) |
-| `assets/cam/…` | Camera rails | [Cameras](#cameras-camallrbh) |
-| `assets/sound/O_*.rbh` | Oneshoot SFX / voice | [Audio](#audio-digital-sfx) |
-| `assets/sound/gamesnds.rbh` | SFX bank + index | [Audio](#audio-digital-sfx) |
+| Path | Kind | Report |
+|------|------|--------|
+| `assets/art/stageN/world/worldN.rbh` | Stage geometry | [meshes.md](meshes.md) |
+| `assets/art/stage1/creature/CREAT*.rbh` | Creature meshes | [meshes.md](meshes.md), [creatures.md](creatures.md) |
+| `assets/art/stage1/creature/*.vmc` | Creature texture banks | [textures.md](textures.md), [creatures.md](creatures.md) |
+| `assets/sprite/spr.rbh` | Sprite frame table | [sprites.md](sprites.md) |
+| `assets/evt/…` | Event scripts | [events.md](events.md), [events-detailed.md](events-detailed.md) |
+| `assets/cam/…` | Camera rails | [cameras.md](cameras.md) |
+| `assets/sound/O_*.rbh` | Oneshoot SFX / voice | [audio.md](audio.md) |
+| `assets/sound/gamesnds.rbh` | SFX bank + index | [audio.md](audio.md) |
 
 `spr.rbh` is metadata only. Pixel data lives in `.vmc` banks.
 
-How those files become a frame (DirectDraw / software rasterizer, mesh submit, VRAM pages): [Game rendering](#game-rendering-thotdexe). How a scripted sequence plays (event VM + rails, no FMV): [Cutscenes](#cutscenes-thotdexe). Spawn, AI, scoring, and gun hits: [Enemy systems](#enemy-spawn-ai-scoring-and-collision-thotdexe).
+How those files become a frame (DirectDraw / software rasterizer, mesh submit, VRAM pages): [game-rendering.md](game-rendering.md). How a scripted sequence plays (event VM + rails, no FMV): [cutscenes.md](cutscenes.md). Spawn, AI, scoring, and gun hits: [enemy-systems.md](enemy-systems.md).
 
 ---
 
@@ -105,7 +154,7 @@ How those files become a frame (DirectDraw / software rasterizer, mesh submit, V
 
 How bytes sit on disk before any asset-specific parse. RBHF (`.rbh`) and VVTP (`.vmc`) both use this layer.
 
-Decomp anchors: `FUN_00410e68` (PACK unpack), `FUN_00410818` / `FUN_00410d3c` / `FUN_00585aa0` (LZ), `FUN_005769c0` (PIFF+RBHF probe), `FUN_00576610` (PIFF+VVTP load).
+Decomp anchors: `UnpackPackToBody` (`FUN_00410e68`) (PACK unpack), `LzReadSignedVarint` (`FUN_00410818`) / `LzDecompressHunk` (`FUN_00410d3c`) / `LzDecompressBuffered` (`FUN_00585aa0`) (LZ), `LoadPiffRbh` (`FUN_005769c0`) (PIFF+RBHF probe), `LoadPiffVvtp` (`FUN_00576610`) (PIFF+VVTP load).
 
 ### PIFF file
 
@@ -148,7 +197,7 @@ The parser walks until EOF. Trailing bytes after the last chunk are an error.
 
 ### PACK → BODY
 
-A `PACK` chunk is a compressed `BODY`. Unpack (`FUN_00410e68`) concatenates **hunks** until a terminator:
+A `PACK` chunk is a compressed `BODY`. Unpack (`UnpackPackToBody` (`FUN_00410e68`)) concatenates **hunks** until a terminator:
 
 ```
 repeat:
@@ -168,7 +217,7 @@ Uncompressed files already store `BODY` and never go through this path. Sound RB
 
 Codec used inside each PACK hunk. Stream of **signed varints**; negative tokens are back-references, non-negative tokens are literal runs.
 
-#### Signed varint (`FUN_00410818`)
+#### Signed varint (`LzReadSignedVarint` (`FUN_00410818`))
 
 First byte:
 
@@ -182,7 +231,7 @@ Continuation bytes: `0x80` = more, low 7 bits appended with a running shift of 6
 
 `value = sign * magnitude`.
 
-#### Tokens (`FUN_00410d3c`)
+#### Tokens (`LzDecompressHunk` (`FUN_00410d3c`))
 
 While output is shorter than `uncompressedSize`:
 
@@ -196,7 +245,7 @@ While output is shorter than `uncompressedSize`:
 
 Offsets are **absolute** in the current hunk’s output, not distances backward from the write head.
 
-### How the tool works (`-d`)
+### How the tool works
 
 This layer is the only place that **decompresses** Tantalus LZ. Typed decoders (`-p`, `-w`) call it first; `-d` is this layer by itself.
 
@@ -204,38 +253,38 @@ This layer is the only place that **decompresses** Tantalus LZ. Typed decoders (
 
 | File | Role |
 |------|------|
-| `src/piff.ts` | `loadPiff` / `serializePiff` / `decompressPiff` |
-| `src/pack.ts` | Walk hunk headers, call LZ per hunk, concatenate |
-| `src/lz.ts` | `readVarint` + `decompressLz` |
+| `src/hotd_decompress/piff.py` | `load_piff` / `serialize_piff` / `decompress_piff` |
+| `src/hotd_decompress/pack.py` | Walk hunk headers, call LZ per hunk, concatenate |
+| `src/hotd_decompress/lz.py` | `read_varint` + `decompress_lz` |
 
 #### `-d` / `--decompress`
 
 ```text
-bun run index.ts -d <file> [output]
+uv run hotd-decompress -d <file> [output]
 ```
 
-1. `loadPiff` — require magic `PIFF`, size field `== fileLength - 8`, walk chunks with **no** odd-size pad.
-2. `decompressPiff` — each `PACK` → `unpackPack` → `BODY`; other tags copied as-is.
-3. `serializePiff` — rewrite `PIFF` + same form + new chunk list (still unpadded).
+1. `load_piff` — require magic `PIFF`, size field `== fileLength - 8`, walk chunks with **no** odd-size pad.
+2. `decompress_piff` — each `PACK` → `unpack_pack` → `BODY`; other tags copied as-is.
+3. `serialize_piff` — rewrite `PIFF` + same form + new chunk list (still unpadded).
 4. Write bytes. Default: `decompressed_assets/<name>.decomp.<ext>` (parent dir created).
 
 Stdout: form, how many PACK chunks expanded, unpacked BODY bytes, tag counts, output path.
 
-A file that is already all `BODY` still round-trips (0 PACK expanded). Trailing zeros after a PACK terminator are ignored; leftover non-zero bytes abort.
+A file that is already all `BODY` still round-trips (0 PACK expanded). `-d --all` skips those files instead of writing them. Trailing zeros after a PACK terminator are ignored; leftover non-zero bytes abort.
 
 #### In-memory use (no `-d` write)
 
-`-p` and `-w` call `decompressPiff` on the loaded file, then parse the resulting `BODY`s. They do not write a `.decomp.*` PIFF unless you also run `-d`.
+`-p` and `-w` call `decompress_piff` on the loaded file, then parse the resulting `BODY`s. They do not write a `.decomp.*` PIFF unless you also run `-d`.
 
-Inspect / `-m` / `-s` / `-e` / `-c` use `loadRbh` and **do not** expand PACK. Packed mesh/sprite/evt/cam files need `-d` first.
+Inspect / `-m` / `-s` / `-e` / `-c` use `load_rbh` and **do not** expand PACK. Packed mesh/sprite/evt/cam files need `-d` first.
 
 ---
 
 ## RBH / RBHF
 
-`.rbh` files are PIFF forms named **RBHF** (“RBH file”). The container is shared; the BODY payloads are not. This section covers the container. Payload layouts are in the per-type sections below.
+`.rbh` files are PIFF forms named **RBHF** (“RBH file”). The container is shared; the BODY payloads are not. This report covers the container. Payload layouts are in the per-type reports.
 
-Decomp: `FUN_005769c0` probes `PIFF` + `RBHF` (`0x46464950` / `0x46484252`). Mesh load goes through `FUN_00419cac` / `FUN_00419cf4` → `FUN_005769c0`.
+Decomp: `LoadPiffRbh` (`FUN_005769c0`) probes `PIFF` + `RBHF` (`0x46464950` / `0x46484252`). Mesh load goes through `LoadCreatMeshBank` (`FUN_00419cac`) / `LoadWorldMeshBank` (`FUN_00419cf4`) → `LoadPiffRbh` (`FUN_005769c0`).
 
 ### File shape
 
@@ -332,16 +381,16 @@ The container does not store a type fourcc beyond `RBHF`. Heuristics used by thi
 | 1 BODY, small root (`firstPtr ≤ 0x400`), nested `0xFFFFFFFF`-terminated tables | Events |
 | 1 BODY, groups of 6 Hermite tracks `{u16 keyCount, u16 log2(keyCount)}` | Cameras |
 
-### How the tool works (inspect)
+### How the tool works
 
 #### Inspect (no flag)
 
 ```text
-bun run index.ts <file.rbh>
+uv run hotd-decompress <file.rbh>
 # no path → assets/evt/allstage/evtALL.rbh
 ```
 
-`inspectRbh` → `loadRbh` → `describeRbh`. Prints to stdout; **does not write a file** and **does not expand PACK**.
+`inspect_rbh` → `load_rbh` → `describe_rbh`. Prints to stdout; **does not write a file** and **does not expand PACK**.
 
 The summary lists:
 
@@ -358,13 +407,13 @@ The container parser does not pick a payload type. Other flags run their own heu
 
 | Flag | Entry | Failure |
 |------|--------|---------|
-| `-w` | `src/audio.ts` | no oneshoot / gamesnds BODY |
-| `-m` | `src/mesh.ts` | not flags `2,0` + float3 BODY1 |
-| `-s` | `src/sprite.ts` | not 1 BODY / not a sprite pointer table |
-| `-e` | `src/event.ts` | not 1 BODY / not a small root table |
-| `-c` | `src/camera.ts` | not 1 BODY / not a camera group table |
+| `-w` | `src/hotd_decompress/audio.py` | no oneshoot / gamesnds BODY |
+| `-m` | `src/hotd_decompress/mesh.py` | not flags `2,0` + float3 BODY1 |
+| `-s` | `src/hotd_decompress/sprite.py` | not 1 BODY / not a sprite pointer table |
+| `-e` | `src/hotd_decompress/event.py` | not 1 BODY / not a small root table |
+| `-c` | `src/hotd_decompress/camera.py` | not 1 BODY / not a camera group table |
 
-`-d` only rewrites PIFF (`PACK`→`BODY`); it does not interpret RBHH. See [PIFF](#piff-container-pack-and-lz).
+`-d` only rewrites PIFF (`PACK`→`BODY`); it does not interpret RBHH. See [piff.md](piff.md).
 
 ---
 
@@ -372,7 +421,7 @@ The container parser does not pick a payload type. Other flags run their own heu
 
 Texture **pixels** live in PIFF form **VVTP** files, usually with a `.vmc` extension. They are not RBHF. Sprite UVs in `spr.rbh` only *name* pages in these banks.
 
-Decomp: `FUN_00576610` loads PIFF+VVTP and registers BODY pages; `FUN_0045640c` packs RGB555 with the `0x8000` bit; `FUN_0041a220` remaps colours (“Generating Textures”).
+Decomp: `LoadPiffVvtp` (`FUN_00576610`) loads PIFF+VVTP and registers BODY pages; `PackRgb555` (`FUN_0045640c`) packs RGB555 with the `0x8000` bit; `GenerateTextures` (`FUN_0041a220`) remaps colours (“Generating Textures”).
 
 ### File
 
@@ -405,11 +454,11 @@ offset  size  field
 0x40    w*h*2 pixels, RGB555, row-major
 ```
 
-Detection used by `src/texture.ts`: `headerSize == 0x40`, non-zero size ≤ 4096, RGB masks as above, and payload long enough for the pixel array.
+Detection used by `src/hotd_decompress/texture.py`: `headerSize == 0x40`, non-zero size ≤ 4096, RGB masks as above, and payload long enough for the pixel array.
 
 ### Pixel format
 
-Engine format is **RGB555 plus bit 15** (`FUN_0045640c` ORs `0x8000` onto packed colours):
+Engine format is **RGB555 plus bit 15** (`PackRgb555` (`FUN_0045640c`) ORs `0x8000` onto packed colours):
 
 ```
 15        10  9         5  4         0
@@ -425,9 +474,9 @@ Two values are treated as transparent (engine clear colours):
 | Word | Role |
 |------|------|
 | `0x0000` | Clear |
-| `0x8421` | Clear (`TEXTURE_CLEAR` in `src/texture.ts`) |
+| `0x8421` | Clear (`TEXTURE_CLEAR` in `src/hotd_decompress/texture.py`) |
 
-`FUN_0041a220` seeds a 64K remap table with `table[0] = 0x8421` and `table[0x8000] = 0x8421`, then applies blood-colour overrides.
+`GenerateTextures` (`FUN_0041a220`) seeds a 64K remap table with `table[0] = 0x8421` and `table[0x8000] = 0x8421`, then applies blood-colour overrides.
 
 ### Creature banks
 
@@ -445,24 +494,25 @@ The exe can remap `texture.VMC` at runtime instead of shipping the `B_*` files.
 
 - Mesh prims store a `texPageId` and pixel-space UVs on a 256×256 page (`MESH_PAGE_SIZE`).
 - Sprite frames store `pageId` plus a pixel rectangle `(u0,v0)–(u1,v1)` on that page.
-- Page bands in this bank: **1–337** sprites, **338–511** unused, **512–546** world, **547–595** creature skins. Species → page: [Creatures](#creatures-exe-types--creat-ids--vvtp-pages).
-
-### How the tool works (`-p`)
+- Page bands in this bank: **1–337** sprites, **338–511** unused, **512–546** world, **547–595** creature skins. Species → page: [creatures.md](creatures.md).
+### How the tool works
 
 ```text
-bun run index.ts -p|--png <file.vmc|file.rbh> [outdir]
+uv run hotd-decompress -p|--png <file.vmc|file.rbh> [outdir]
 ```
 
-`convertTexturesToPng` (`src/texture.ts`):
+`convert_textures_to_png` (`src/hotd_decompress/texture.py`):
 
-1. `loadPiff` + `decompressPiff` — packed `B_*` pages become BODY in memory.
-2. Keep chunks tagged `BODY` whose payload passes `isTexturePage` (0x40 header, RGB555 masks, size fits).
-3. `parseTexturePage` → `rgb555ToRgba` (`0x0000` and `0x8421` → alpha 0) → `encodePng` (`src/png.ts`).
+1. `load_piff` + `decompress_piff` — packed `B_*` pages become BODY in memory.
+2. Keep chunks tagged `BODY` whose payload passes `is_texture_page` (0x40 header, RGB555 masks, size fits).
+3. `parse_texture_page` → `rgb555_to_rgba` (`0x0000` and `0x8421` → alpha 0) → `encode_png` (`src/hotd_decompress/png.py`).
 4. Write `page_<pageId padded to 4 digits>.png`. Default dir: `decompressed_assets/<stem>_png/`.
+
+`encode_png` writes 8-bit RGBA, filter 0. IDAT is `zlib.compress`. The TypeScript port uses Node `deflateSync`, so the PNG file bytes differ while the RGBA pixels match.
 
 Stdout: page count, first page `width×height`, skipped non-texture chunks, files written.
 
-If **zero** pages match, the CLI exits 1 and reminds you that `spr.rbh` is metadata — use a `.vmc`. Running `-p` on an RBHF that is not VVTP pages fails the same way.
+If **zero** pages match, the CLI exits 1 and reminds you that `spr.rbh` is metadata — use a `.vmc`. A batch walk (`-p --all`, or `-p` on a directory) counts that as a skip. Running `-p` on an RBHF that is not VVTP pages fails the same way.
 
 `-d` on the same `.vmc` writes a decompressed PIFF (`*.decomp.VMC`) with one BODY per page; `-p` does not write that PIFF, only PNGs.
 
@@ -474,9 +524,9 @@ Page ids in PNG names are the header `pageId` field, not the chunk index. Mesh `
 
 Digital sound effects live in RBHF files under `assets/sound/`. They are already uncompressed (`BODY` only, no `PACK`).
 
-Stage / menu **music** is CD audio via MCI (`cdaudio`) in the exe. It is not in these files.
+Stage / menu **music** is CD audio via MCI (`cdaudio`) in the exe. It is not in these files. Event scripts can still **request** it: `SNDON` kind 3 calls `PlayCdAudioTrack` (`FUN_00565d60`). See [cutscene-audio.md](cutscene-audio.md).
 
-Decomp: `FUN_00411f10` inits the mixer at **11025 Hz, 8-bit, 3 voices**. The “3 channels” are mixer voices, not stereo in the files. Sample rate constant `_DAT_00c721e4 = 0x2b11`. Runtime oneshoots are requested as `sound\O_%s.rbh`.
+Decomp: `InitSoundMixer` (`FUN_00411f10`) inits the mixer at **11025 Hz, 8-bit, 3 voices**. The “3 channels” are mixer voices, not stereo in the files. Sample rate constant `_DAT_00c721e4 = 0x2b11`. Runtime oneshoots are requested as `sound\O_%s.rbh`.
 
 ### Shared PCM format
 
@@ -487,7 +537,7 @@ Decomp: `FUN_00411f10` inits the mixer at **11025 Hz, 8-bit, 3 voices**. The “
 | Channels | Mono |
 | Silence | ≈ `0x80` |
 
-This tool writes standard PCM WAVs (`src/wav.ts`) with those parameters.
+This tool writes standard PCM WAVs (`src/hotd_decompress/wav.py`) with those parameters.
 
 ### Oneshoot — `O_*.rbh`
 
@@ -503,7 +553,7 @@ BODY:
 
 `0x00082C30` is also the **external-ref sentinel** in `gamesnds.rbh` (see below). `soundId` is how the bank points at a sibling `O_*` file.
 
-Example: `bun run index.ts -w assets/sound/O_HELP.rbh` → `decompressed_assets/O_HELP_wav/O_HELP.wav`.
+Export: `uv run hotd-decompress -w assets/sound/O_HELP.rbh` → `decompressed_assets/O_HELP_wav/O_HELP.wav`.
 
 ### Bank — `gamesnds.rbh`
 
@@ -518,7 +568,7 @@ Index size must be a multiple of `0x28`. This tool requires `sampleRate` at `+0x
 
 #### Index row (0x28 bytes)
 
-Known fields used by `src/audio.ts`:
+Known fields used by `src/hotd_decompress/audio.py`:
 
 ```
 offset  size  field
@@ -545,33 +595,37 @@ Output names:
 - Embedded: `clip_XXX.wav`
 - External: `ext_XXX_O_NAME.wav`
 
-### How the tool works (`-w`)
+### How the tool works
 
 ```text
-bun run index.ts -w|--wav <file.rbh> [outdir]
+uv run hotd-decompress -w|--wav <file.rbh> [outdir]
 ```
 
-`convertSoundsToWav` (`src/audio.ts` + `src/wav.ts`):
+`convert_sounds_to_wav` (`src/hotd_decompress/audio.py` + `wav.py`):
 
-1. `loadPiff` + `decompressPiff` (sound files in this tree have no PACK; this is a no-op).
+1. `load_piff` + `decompress_piff` (sound files in this tree have no PACK; this is a no-op).
 2. Collect `BODY` chunks.
 3. **Oneshoot** if there is one BODY starting with `0x00082C30` / `u16 2`. Clip name = input stem (`O_HELP.rbh` → `O_HELP.wav`).
 4. **gamesnds** if there are two BODYs, index length `% 0x28 == 0`, and `+0x08` of the first row is `0x2B11`. Then:
    - scan `dirname(input)` for `O_*.rbh`, parse each oneshoot, key by `soundId`;
    - embedded rows → slice BODY1, name `clip_XXX`;
    - external rows → copy the matching oneshoot, name `ext_XXX_O_NAME`; missing siblings increment `skippedExternal` and are omitted.
-5. `encodeWavPcm8Mono` — RIFF WAV, unsigned 8-bit, 1 channel, 11025 Hz.
+5. `encode_wav_pcm8_mono` — RIFF WAV, unsigned 8-bit, 1 channel, 11025 Hz.
 6. Default dir: `decompressed_assets/<stem>_wav/`.
 
 Stdout: clip count, format line, skipped external refs (if any), files written.
 
-Zero clips → exit 1 (wrong file, or CD music path). The tool does not touch MCI `cdaudio`.
+Zero clips → exit 1 (wrong file, or CD music path). A batch walk counts that as a skip (`WAV skip (no clips)`). The tool does not touch MCI `cdaudio`.
+
+### Sound-request table (`THOTD.exe`)
+
+`SNDON` in `evtALL.rbh` does **not** store a filename. The u32 arg indexes `DAT_005cbda8` (270 × `0x0C` rows). Kind 4 sprintf's `sound\O_%s.rbh`; kinds 1–2 play `gamesnds.rbh` row `extra`; kind 3 is a CD track. Cue join: [cutscene-audio.md](cutscene-audio.md). Parser: `src/hotd_decompress/sound_table.py` (not a CLI flag).
 
 ---
 
 ## Meshes (`world*.rbh`, `CREAT*.rbh`)
 
-Stage geometry and creature models share one RBHF layout: a pointer graph plus a float3 vertex pool. Prim batches match `FUN_00578bb0`. Load path: `FUN_00419cac` / `FUN_00419cf4` → `FUN_005769c0`.
+Stage geometry and creature models share one RBHF layout: a pointer graph plus a float3 vertex pool. Prim batches match `DispatchMeshPrims` (`FUN_00578bb0`). Load path: `LoadCreatMeshBank` (`FUN_00419cac`) / `LoadWorldMeshBank` (`FUN_00419cf4`) → `LoadPiffRbh` (`FUN_005769c0`).
 
 ### Container
 
@@ -640,7 +694,7 @@ Then:
 
 `vertBase / 12` is the first vertex this node uses. Prim indices are **local** to that slice (index 0 = `pool[vertBase/12]`).
 
-### Prim batches (`FUN_00578bb0`)
+### Prim batches (`DispatchMeshPrims` (`FUN_00578bb0`))
 
 A node is followed by zero or more batches until `count == 0` (or a negative `sizeShorts`).
 
@@ -688,16 +742,16 @@ The renderer also uses other flag bits (e.g. `0x200` skips a facing test). This 
 
 UVs are **pixel coordinates** on a 256×256 VVTP page (`MESH_PAGE_SIZE`). `texPageId` matches `page_XXXX` from `-p` on the matching `.vmc`. OBJ export converts to `0..1` and flips V (`(256 - v) / 256`) so OBJ’s V-up matches the page’s V-down.
 
-### How the tool works (`-m`)
+### How the tool works
 
 ```text
-bun run index.ts -m|--mesh <file.rbh> [outdir]
+uv run hotd-decompress -m|--mesh <file.rbh> [outdir]
 ```
 
-`convertMeshesToObj` (`src/mesh.ts`) uses `loadRbh` — **no PACK expand**. Retail `world*.rbh` / `CREAT*.rbh` are already BODY.
+`convert_meshes_to_obj` (`src/hotd_decompress/mesh.py`) uses `load_rbh` — **no PACK expand**. Retail `world*.rbh` / `CREAT*.rbh` are already BODY.
 
-1. `isMeshRbh`: ≥2 header rows, flags `2` then `0`, BODY1 size `% 12 == 0`.
-2. `detectKind`: try creat id table (`id == -1` terminator), else world (`id == 0`).
+1. `is_mesh_rbh`: ≥2 header rows, flags `2` then `0`, BODY1 size `% 12 == 0`.
+2. `detect_kind`: try creat id table (`id == -1` terminator), else world (`id == 0`).
 3. Unique node offsets from the id table, sorted; parse each node’s batches.
 4. Default dir: `decompressed_assets/<stem>_mesh/`.
 
@@ -713,9 +767,293 @@ OBJ details:
 - untextured faces: `usemtl none` after a textured run
 - comment lines for position (world) and scale
 
+`ids.json` follows `jsonutil.write_json` (whole floats print as `n.0`). OBJ `v` / `vt` lines use the same number text for non-integers, so a tiny value can be scientific (`4.6e-05`). The TypeScript port prints a long decimal for that same float. Topology and UV counts match.
+
 Stdout: `kind`, id count, node count, files written.
 
-Pair OBJ materials with `-p` on the matching `.vmc` (`page_XXXX.png`). CREAT ids are body parts; the exe type table and skeleton trees that group them into named creatures are in [Creatures](#creatures-exe-types--creat-ids--vvtp-pages).
+Pair OBJ materials with `-p` on the matching `.vmc` (`page_XXXX.png`). CREAT ids are body parts; the exe type table and skeleton trees that group them into named creatures are in [creatures.md](creatures.md).
+
+`-m` writes every prim as an OBJ face (quads stay 4-gons). A dump of many **CREAT** nodes is a spike ball because the engine submits one bone mesh per frame ([game-rendering.md](game-rendering.md), [motion.md](motion.md)), not because the node bytes are wrong. World quads are strip-ordered; fanning `(0,1,2)+(0,2,3)` bowties them. CREAT quads are perimeter order and that fan is the exe split.
+
+---
+
+## Creatures (exe types → CREAT ids → VVTP pages)
+
+On-disk creature data is **pooled**, not one file per enemy. Names live in `THOTD.exe` motion strings and a 94-row type table. Mesh parts are `CREAT1.RBH` / `CREAT2.rbh` ids; skins are VVTP pages in `texture.VMC` / `B_*`.
+
+This note is **not** a CLI flag. `scripts/creature_map.py` joins the exe tables below to CREAT `texPageId`s and `evtALL` spawns. Decomp: `LoadStageAssets` (`FUN_00418aa0`) (load), `LoadCreatMeshBank` (`FUN_00419cac`) (CREAT id table → `DAT_00d53080`), `ApplyCreatureTypeStats` (`FUN_00483ad0`) (type → model id).
+
+### Files are banks
+
+| Asset | Role |
+|--------|------|
+| `CREAT1.RBH` | Creature/NPC mesh parts. 1397 ids, 917 nodes. Ids **0–6611**, no overlap with CREAT2. |
+| `CREAT2.rbh` | Same layout. 2677 ids, 1517 nodes. Ids **55–7498**. |
+| `texture.VMC` / `B_*` / `bigger.vmc` | One shared page bank. `B_RED`…`B_PURPL` are blood-colour remaps of the same 421 pages, not different species. |
+
+`LoadStageAssets` (`FUN_00418aa0`) always loads `ART\STAGE1\CREATURE\CREAT1.RBH`, then `CREAT2.RBH`, then `texture.VMC`. There is no per-chapter creature file.
+
+Each CREAT id is one **body-part node** (median ~20 verts), not a whole character. A creature is a skeleton of many ids.
+
+`LoadCreatMeshBank` (`FUN_00419cac`) copies each CREAT id table into a global slot array:
+
+```
+for (id, nodePtr) in table until id == -1:
+    DAT_00d53080[id] = nodePtr
+```
+
+CREAT2 is loaded second; ids do not collide, so both banks sit in one namespace. Draw looks up `DAT_00d53080[modelId]`. Spawn helpers also hardcode model ids (`0xb69`, `0x12c0`, `0xbb0`, …); those values are CREAT ids, not world ids.
+
+### Exe tables (`THOTD.exe`)
+
+PE: image base `0x400000`. DGROUP starts at VA `0x5A0000` (file offset `0x187400`). File offset = `0x187400 + (VA − 0x5A0000)`.
+
+| VA | Layout | Role |
+|----|--------|------|
+| `DAT_005d46ac` | 94 × `0x4C` | Per-type stats (model, hit radius, scale, default motion) |
+| `DAT_005efa58` | 94 × `s32` | Bone count |
+| `DAT_005ef8e0` | 94 × pointer | Skeleton root (bone tree) |
+| `DAT_005efbd0` | 674 × pointer | `MO_*` clip bases — [motion.md](motion.md) |
+| `DAT_005f0658` | 674 × `s32` | Clip frame counts |
+| `DAT_005f1258` | 674 × pointer | `MO_*` motion name strings |
+
+**94 skeleton-backed types are not every actor.** `BindSpawnEventType` (`FUN_0047b2c4`) / `ApplyCreatureTypeStats` (`FUN_00483ad0`) index the `0x4C` stride with no visible 94-entry bounds check. Stage 1 has ten slot-128 occurrences with selector **107**; that row has model 0, radius 0, scale 1 and is a controller/special type, not permission to walk past the 94-entry skeleton arrays. Thirteen of the 94 trees also reference a CREAT id absent from both banks — some handlers reject selectors, some nodes are conditional. Keep the declared bone stride even when a walk finds fewer nodes (types 41/42/43/44/46/66 have 12 reachable nodes on an 18-bone stride; type 91 has 16/18).
+
+Ghidra often reads the 16-bit type at `entity+0xd4` as `*(int*)(entity+0xd2) >> 16`. Motion id is the 16-bit at `+0xd8` (`>> 16` of `+0xd6`). Do not model `+0xd4` and that overlapping load as two independent simultaneous fields without tracing lifetimes.
+
+#### Type row (`0x4C`)
+
+```
+offset  size  field
+0x00    4     u32 modelId     root / display id (may be absent from CREAT; bones have the real ids)
+0x14    4     f32 hitRadius   copied to entity+0x98; gun sphere in `SphereHitTest` (`FUN_00414aac`) (not combat HP)
+0x28    4     f32 scale
+0x2C    4     f32 yOffset
+0x30    4     f32 (extra)
+0x44    4     u32 defaultMotion   index into DAT_005f1258
+```
+
+`ApplyCreatureTypeStats` (`FUN_00483ad0`) copies `+0x00` → `entity+0x5c` (model id), `+0x14` → `+0x98` (hit-sphere radius), `+0x28` → `+0x9c` (scale). Combat HP is the ENTB u16 at record `+0x22` → `entity+0x78` — [enemy-systems.md](enemy-systems.md).
+
+`defaultMotion` is often a **shared idle** (`MO_b3_pose_2`, `MO_b1_atk_a`), not the species walk set. Species clips (`MO_ebitb_*`, `MO_k_*`, …) are selected at runtime by AI, so type index → Ebitan/Kageo is **not** a single column.
+
+#### Skeleton node (`DAT_005ef8e0[type]`)
+
+```
+offset  size  field
+0x00    4     u32 meshId      CREAT id; 0 = dummy root
+0x04    12    f32 xyz         local bone offset
+0x14    4     bone index
+0x18    4     u32 childCount  (0..8)
+0x1C    4×N   child pointers
+```
+
+Walk only `+0x00` as the mesh id and `+0x1C` for `childCount` children. Treating every word as an id pulls in unrelated meshes (including id 0 → page 589). `+0x14` indexes the per-bone `s16` triplet in a `MO_*` frame ([motion.md](motion.md)).
+
+Union of those mesh ids, then OBJ `usemtl page_N`, is the type’s skin set.
+
+### Motion names (species roster)
+
+674 strings at `DAT_005f1258`. Prefix is the developer name; Sega English names in the right column are inferred.
+
+| Prefix | Clips | Index range (main run) | Likely character |
+|--------|------:|------------------------|------------------|
+| `z` | 196 | 467–650 | generic zombie |
+| `k` | 80 | 211–288 | **Kageo** |
+| `p` | 53 | 339–384 | player |
+| `saru` | 49 | 403–451 | **Saruzou** |
+| `ebitb` | 39 | 138–176 | **Ebitan** |
+| `boss4` | 32 | 66–97 | **Magician** (stage 4) |
+| `b3` | 28 | 38–65 | **Hermit** (`tojo_ana` = emerge from a hole) |
+| `b1` | 23 | 0–21 | **Chariot** (`yoroi` = armor) |
+| `dog` / `inu` | 23 | 100–210 | **Kenfis** |
+| `dr` | 20 | 118–137 | **Drake** (knife/throw) |
+| `s` | 18 | 385–402 | scientist / civilian (`help`) |
+| `b2` | 16 | 22–37 | **Hangedman** (`fly` / `glider` / `bat`) |
+| `mol` | 13 | 300–312 | **Murrer** (hole-emerge) |
+| `gman` | 12 | 188–199 | **Goldman** |
+| `kyu` / `kyuri` | 12 | 289–299 | **Cyril** |
+| `frog` | 11 | 177–187 | **Bouere** |
+| `tom` | 8 | 459–466 | **Thomas Rogan** |
+| `hiru` | 6 | 200–205 | **Name** (leech / slug) |
+| `mrg` | 4 | 332–335 | **G** |
+| `onozonbia` | 3 | 336–338 | Cyril axe walk |
+| `taraba` | 3 | 453–455 | **Taran** (crab) |
+| `tekk` | 3 | 456–458 | **Robert** (iron arm) |
+
+`O_*.rbh` names (`O_ST4BO1`, `O_ENEMY1`, `O_INU`, `O_FROG2`) are mixer labels (`sound\O_%s.rbh`), not CREAT or page keys.
+
+### VVTP page bands
+
+The creature `.vmc` is a **whole-game atlas**. Page ids (header `pageId`, same numbers as `-p` PNG names):
+
+| Pages | Used by |
+|------:|---------|
+| 1–337 | `spr.rbh` frames |
+| 338–511 | unused gap (174 missing ids in `B_RED`) |
+| 512–546 | `world*.rbh` |
+| **547–595** | **CREAT mesh skins** |
+
+Page 18 is a sprite page, not a creature skin.
+
+### Official roster → engine types
+
+Sega names and A–G codes from the Saturn manual / Curien report. Engine types from `DAT_005d46ac` + CREAT skeleton pages + slot-128 `spawnEventId` (that field *is* the type for `BindSpawnEventType` (`FUN_0047b2c4`)). Default motions are often a shared idle (`MO_b3_pose_2`); species clips live in the 674-name `MO_*` list.
+
+| Sega | Name | Chapters | Type(s) | Conf. | Evidence |
+|------|------|----------|---------|-------|----------|
+| A-1 | **Sam** | 1–4 | **16**, 91 | high | Exe logs `ENGuard_BO_zonbiman` when type `== 0x10`; grey muscular page 556 |
+| A-2 | Neil | 1–3 | 11? | medium | Stronger Sam; type 11 is scale 1.2 on the green-flesh + civilian mix |
+| A-3 | **Cyril** | 1–3 | **18** | high | Grey suit + chest wound, radius 9, `MO_kyu_*` / `MO_onozonbia_*` |
+| B-1 / B-2 | Kageo / Bourbon | 1, 3 | 3, 4 | medium | Green rotting page 550; `MO_k_*` is the largest non-generic clip set |
+| B-3 / B-4 | Ebitan a / b | 1–3 | 87 | medium | Green cracked 575/583; `MO_ebitb_*` and `MO_d_sakaoli` (hang) |
+| C-1 / C-2 | Samson / Bentley | 1–4 | 71, 73 | medium | Stony muscular + belt on page 578 |
+| C-3 | Burner | 3 | 74? | low | Blowtorch Samson; red muscular page 580 |
+| D-1 | Simon | 1–2 | 82 | medium | Grey muscular grinning; shoulder-tackle type |
+| D-2 | Gilmore | 2, 4 | — | — | Sledgehammer; not pinned |
+| D-3 | Harris | 3–4 | — | — | Ball and chain; not pinned |
+| D-4 | Robert | 3–4 | — | — | Metal arm; `MO_tekk_*` |
+| E-1 | Rubin | 2 | — | — | Rolls / claws; not pinned |
+| E-2 | **Drake** | 2 | **83**, 84 | high | Default motion `MO_dr_l_nage`; grinning one-eyed page 574 |
+| E-3 | Moody | 3–4 | — | — | Iron claw / wall; `MO_mood*` / `MO_monkabe*` |
+| E-4 | Parlor | 3–4 | 84? | low | Drake-like; `MO_dr_knif_chaku` |
+| F-1 | Kenfis | 1 | 75? | low | Hellhound; `MO_ddogg*` / `MO_inu*` |
+| F-2 | **Saruzou** | 1 | **1** | high | Primate pages 582/585, scale 0.5; 68 Stage 01 slot-128 spawns |
+| F-3 | Bouere | 1 | — | — | Water frog; `MO_frog_*` (not `MO_dr_*`) |
+| F-4 | **Devilon** | 1, 2, 4 | **76** | high | Blue hexagonal demon, pages 557–558 |
+| G-1 | Murrer | 1–2 | 60 / 75? | low | Hole-emerge; `MO_mol_hole_*` |
+| G-2 | Name | 1 | 60 / 75? | low | Wall slug; `MO_hiru_*` |
+| G-3 | Taran | 3 | — | — | Crawler; `MO_taraba_*` |
+| other | kage / pdolob / neopetit / taalu | 1–3 | 86? | low | Unnamed in 1996 print; `MO_zonbi1/2/3` are background walkers |
+| Type 27 | **Chariot** | 1, 4 | **35**, **36** | high | Armor pages 547–549; slot 37 writes type 35 (HP 480) |
+| Type 041 | **Hangedman** | 1–2 | **6**, 7, 8, 38 | high | Bat-wing page 554; slots 35/36 hardcode type 6 |
+| Type 6803 | **Hermit** | 3 | **64** | high | 28 bones; six-hole mask pages 561/562/591; `MO_b3_tojo_ana` |
+| Type 0 | **Magician** | 4 | **51** | high | `MO_boss4_*`; grey bald page 569; radius 12 |
+| NPC | **Goldman** | story | **2** | high | Brown coat, glasses, DBR badge; scale 1.4 |
+| NPC | Scientists / civilians | 1–4 | 17, 19–28, 49, 65, 89 | high | Lab-coat page 551 cluster; civilian 552+568 |
+| NPC | Rogan / G / Sophie / Curien | story | — | — | Single CREAT meshes from `DAT_005ce368` (Sophie = id **7482**, pages 559+560, scale 1.2). Clips `MO_p_*`, `MO_tom_*`, `MO_mrg_*`, `MO_synd_demo` exist but have no type-row skeleton. |
+
+`DAT_005ce368` slot 5 ("Researcher", CREAT id **7483**, scale 0.8) is **not a character mesh**. Its 17 verts split into two mirrored clusters, and the UV patch on page 566 is a small ring (a lens), not skin. The name in the story-NPC table does not mean the CREAT id is a full body.
+
+### Type → page (all 94)
+
+Skeleton walk → unique pages, then checked against `B_RED` PNGs. Hit radius / scale from `DAT_005d46ac`. Bone count from `DAT_005efa58`. Radius is the gun hit-sphere, not combat HP.
+
+High-confidence rows:
+
+| Type | Pages | Bones | Radius | Scale | Identification |
+|-----:|-------|------:|---:|------:|----------------|
+| 1 | 582, 585 | 16 | 8 | 0.5 | **Saruzou** |
+| 2 | 560, 565, 571 | 20 | 5 | 1.4 | **Goldman** |
+| 6 | 554 | 10 | 7 | 1.0 | **Hangedman** (slots 35/36 write this; default motion is Hermit `MO_b3_atk_l`, posed ref is motion 22) |
+| 16 | 556 | 18 | 2 | 1.5 | **Sam** (`zonbiman`) |
+| 17, 19–21, 24, 49 | 551 | 18–20 | ~5–8 | 1.0 | DBR lab-coat scientists |
+| 18 | 563 | 16 | 9 | 1.0 | **Cyril** |
+| 35 / 36 | 35: 547–549, 576; 36: 548–549 | 18 | 1.8 / 8 | 0.5 / 1.0 | **Chariot** |
+| 51 | 569 | 18 | 12 | 1.0 | **Magician** |
+| 64 | 561, 562, 591 | **28** | 2.6 | 1.0 | **Hermit** |
+| 76 | 557, 558 | 16 | 2.8 | 1.2 | **Devilon** |
+| 83 | 574 | 18 | 2.5 | 1.0 | **Drake** (`MO_dr_l_nage`) |
+
+Hangedman's skeleton is a chain, not a biped: root part `1078` branches into a 5-link run (`1080→1082→1084→1086→1088`, each offset `+1.30` in local Z) plus a shorter branch (`1076→1092→1090`). Do not map type-6 bone ids onto arms, legs, or a head without checking each mesh. Species clips are `MO_b2_*`; the type-row default `MO_b3_atk_l` is a shared Hermit idle.
+
+Medium / notable variants: 3–4 Kageo family (page 550); 7 Hangedman body (554+576); 8 Hangedman-sized Stage 02 (radius 12.5); 11 Neil/swamp mix; 23/25–27 civilians (552+568); 38 flying/Hangedman (558+569); 71/73 C-type (578); 82 Simon (573); 84 Drake/Parlor (`MO_dr_knif_chaku`); 87 Ebitan (575+583); 91 Sam variant (556+576).
+
+Type 0 is an all-zero template (bones still 21). Types 5, 10, 39, 44, 52, 66, 75 have **no** VVTP pages on the skeleton walk — 75 (9 bones, scale 0.5) and 60 (scale 0.25) are the best animal/insect candidates.
+
+There are 94 types. Many are clothing/damage/LOD variants that share a page set. Gilmore, Harris, Robert, Rubin, Moody, Kenfis, Bouere, Murrer, Name, Taran, and Curien still have motion sets but no unique type-row default. Sophie / Rogan / G story meshes are the character table at `DAT_005ce368` (not the 94-row type table): slot 4 is Sophie, CREAT id 7482.
+
+### How to reproduce
+
+`scripts/creature_map.py` reads `THOTD.exe` and the retail files under `assets/` (`CREAT1.RBH`, `CREAT2.rbh`, `evtALL.rbh`, `B_RED.VMC`). Skin pages are the CREAT `texPageId`s on the skeleton walk, so a prior `-m` / `-p` / `-e` run is not required.
+
+Exe: `HOTD_EXE`, else `hotd-exe/THOTD.exe`, else `../typescript/hotd-decompress/hotd-exe/THOTD.exe`. Assets: `HOTD_ASSETS` or `assets/`.
+
+1. `uv run python scripts/creature_map.py` — 94 type rows, skeleton mesh ids, CREAT page sets, spawn-fn table (`DAT_005d8118`), and evtALL usage. Writes `decompressed_assets/exe_tables/creature-map.json`.
+2. `uv run python scripts/creature_map.py clusters` — group types by page set; histogram `spawnEventId`; list callers of `ApplyCreatureTypeStats` (`FUN_00483ad0`). Writes `creature-clusters.json`.
+3. `uv run python scripts/creature_map.py more` — type rows 94–127 and the slot-128 prolog.
+4. `uv run python scripts/creature_map.py hp` — spawns with `unk22 >= 10`, Stage 03/04 slot usage, slot 128 by `spawnEventId`.
+5. `sample_motion_frame` in `src/hotd_decompress/motion.py` — one `MO_*` frame (Hangedman reference: motion 22, frame 0, 10 bones). See [motion.md](motion.md).
+
+To join a type to a skin by hand: walk `DAT_005ef8e0[type]`, collect `meshId`s, look up that CREAT node's `usemtl page_N`.
+
+JSON from the runner lands under `decompressed_assets/exe_tables/` (`creature-map.json`, `creature-clusters.json`). Gitignored, not a CLI output.
+
+---
+
+## Motion clips (`THOTD.exe`)
+
+Creature animation is **not** a PIFF payload. The 674 `MO_*` clips live in `THOTD.exe` DGROUP: a name, a frame count, and a packed angle stream per bone. Mesh parts stay in `CREAT*.rbh`; bind-pose trees stay in the type table ([creatures.md](creatures.md)). This note is the clip bytes.
+
+This note is **not** a CLI flag. `src/hotd_decompress/motion.py` samples one integer frame. It does not walk the skeleton or submit meshes. Decomp: `SampleSkeleton` (`FUN_004776c8`), `PlayClipSkeleton` (`FUN_00476b70`) / `ApplyFrameBoneRotates` (`FUN_00478448`), `CopyBoneAngleTriplets` (`FUN_00478324`).
+
+PE map is the same as [creatures.md](creatures.md): image base `0x400000`, DGROUP VA `0x5A0000` (file `0x187400`).
+
+### Tables
+
+| VA | Layout | Role |
+|----|--------|------|
+| `DAT_005efbd0` | 674 × pointer | Clip base (first frame) |
+| `DAT_005f0658` | 674 × `s32` | Frame count |
+| `DAT_005f1258` | 674 × pointer | `MO_*` name strings |
+
+Indexed by the 16-bit motion id at `entity+0xd8` (`>> 16` of `+0xd6`). Type-row `defaultMotion` (`DAT_005d46ac+0x44`) is often a **shared idle**, not the species walk set — [creatures.md](creatures.md). Type 6 (Hangedman) stores `MO_b3_atk_l` (Hermit); Hangedman clips are `MO_b2_*`. The posed reference frame is motion **22** (`MO_b2_base`), frame **0**.
+
+Bone count for the stride comes from `DAT_005efa58[type]`, not from the clip.
+
+### Frame layout
+
+```
+stride = (boneCount * 6 + 0x0F) & ~3
+```
+
+Same expression in `SampleSkeleton` (`FUN_004776c8`) / `CopyMotionFrame` (`FUN_004784d4`) (`iVar2 * 6 + 0xfU & 0xfffffffc`). Frame `f` starts at `clipBase + f * stride`.
+
+```
+offset  size  field
+0x00    12    f32 x, y, z     root header (root translation / blend; often unused for display)
+0x0C    6×N   per bone        s16 ax0, ax1, ax2
+…       pad                   up to stride
+```
+
+Per-bone shorts are in **clip order 0..boneCount−1**. The skeleton node’s `+0x14` bone index selects the triplet (`ApplyFrameBoneRotates` (`FUN_00478448`): `frame+0x0C + boneIndex*6`). Dummy roots (`meshId == 0`) still have an index.
+
+Angles are **16-bit full-circle** (`65536 = 360°`). The exe looks up sin/cos in `DAT_005697b0` (index `angle >> 4`).
+
+### Playback (`PlayClipSkeleton` / `FUN_00476b70`)
+
+Per bone, after a matrix push:
+
+1. Translate local offset with **Z negated**: `MatrixTranslate(x, y, -z)` (`FUN_00474ecc`) (`WalkSkeletonNode` (`FUN_00477ec4`) does the same from the skeleton node).
+2. Rotate, in this order, from the three shorts:
+
+| Call | Axis | Clip short |
+|------|------|------------|
+| `MatrixRotateZ(-ax2)` (`FUN_004751f4`) | local **Z** | third `s16` |
+| `MatrixRotateY(ax1)` (`FUN_004750ec`) | local **Y** | second `s16` |
+| `MatrixRotateX(ax0)` (`FUN_00475380`) | local **X** | first `s16` |
+
+That is `Rz(-ax2) · Ry(ax1) · Rx(ax0)` on the current 3×4. Ghidra comments that swapped these three axes are wrong; the matrix updates match Z / Y / X as named here.
+
+The 3×4 is row-major 3×3 at `[0..8]`, translation at `[9,10,11]` (`DAT_012e27f0`, 12 floats). Then the bone’s CREAT mesh is submitted (`EnqueueOpaqueIfLive` (`FUN_0043d7f8`)) and children are walked.
+
+`SampleSkeleton` (`FUN_004776c8`) can blend two frames (`InterpolateBoneKeyframes` (`FUN_004775f4`) per bone) when transition bits at `entity+0x3ce` are set. `sample_motion_frame` reads **one integer frame** (no blend).
+
+### What the tool does
+
+| Module | Role |
+|--------|------|
+| `src/hotd_decompress/creature_map.py` | Type rows + bind-pose mesh ids (`meshId`, children) |
+| `src/hotd_decompress/motion.py` | Name / frame count / clip bytes → `ax0, ax1, ax2` on each bone |
+
+`sample_motion_frame(exe_bytes, motion_index, frame, bone_count)` clamps `frame` into `0 .. frameCount-1`.
+
+### How to reproduce
+
+1. `-m` on `CREAT1.RBH` / `CREAT2.rbh` and `-p` on `B_RED.VMC` — same as [creatures.md](creatures.md).
+2. Call `sample_motion_frame` with motion **22**, frame **0**, and type 6’s bone count (`DAT_005efa58[6]` = 10).
+
+Prefix roster (`z`, `k`, `b2`, …) stays in [creatures.md](creatures.md). Spawn / AI that picks a motion id: [enemy-systems.md](enemy-systems.md). Draw submit after the bone matrix: [game-rendering.md](game-rendering.md).
 
 ---
 
@@ -723,7 +1061,7 @@ Pair OBJ materials with `-p` on the matching `.vmc` (`page_XXXX.png`). CREAT ids
 
 `assets/sprite/spr.rbh` is **sprite metadata**: UV rectangles and VVTP page ids. It does not contain pixels. Draw with a `.vmc` bank (`pageId` → `page_XXXX.png`).
 
-Decomp: sprite records are reached via `DAT_005ce544` (`FUN_004430a4` getter, `FUN_004434b0` scroll-sprite helper).
+Decomp: sprite records are reached via `DAT_005ce544` (`GetSpriteRecord` (`FUN_004430a4`) getter, `StampScrollSprite` (`FUN_004434b0`) scroll-sprite helper).
 
 ### Container
 
@@ -778,20 +1116,20 @@ offset  size  field
 - Not a mesh — no vertices.
 - PNG export (`-p`) on `spr.rbh` will not produce sprite images; run `-p` on a `.vmc` and `-s` on `spr.rbh`, then composite using `pageId` + UV rects.
 
-### How the tool works (`-s`)
+### How the tool works
 
 ```text
-bun run index.ts -s|--sprites <file.rbh> [outdir]
+uv run hotd-decompress -s|--sprites <file.rbh> [outdir]
 ```
 
-`convertSpritesToJson` (`src/sprite.ts`) uses `loadRbh` (no PACK expand).
+`convert_sprites_to_json` (`src/hotd_decompress/sprite.py`) uses `load_rbh` (no PACK expand).
 
 1. Require exactly one BODY.
-2. `isSpriteBody`: first `u32` is a 4-aligned offset into the BODY; `frameCount` at that record is ≤ 4096.
+2. `is_sprite_body`: first `u32` is a 4-aligned offset into the BODY; `frameCount` at that record is ≤ 4096.
 3. `count = firstPtr / 4`. For each slot, `ptr == 0` → skip (counted as `skippedNull`); else parse the record and its frames.
 4. Write `sprites.json`. Default dir: `decompressed_assets/<stem>_spr/` (so `spr.rbh` → `spr_spr/`).
 
-JSON: `source`, `count`, `skippedNull`, `sprites[]` with header UVs, size, and per-frame rect / `pageId` / flags.
+JSON: `source`, `count`, `skippedNull`, `sprites[]` with header UVs, size, and per-frame rect / `pageId` / flags. Written by `jsonutil.write_json` (whole floats print as `n.0`).
 
 Stdout: sprite count, skipped null slots, output path.
 
@@ -803,9 +1141,9 @@ This does **not** emit PNGs. `-p` on `spr.rbh` finds no VVTP pages and exits 1. 
 
 `assets/evt/allstage/evtALL.rbh` is a nested pointer graph of stage → scene → event **script streams**. One BODY (`flags=2`), typically with a `RELC`.
 
-Opcodes, spawn records, and `CCTB` → `camALL` binds: [Events in detail](#events-in-detail-vm-opcodes-spawns-cameras). How those scripts play as in-engine cutscenes (no FMV): [Cutscenes](#cutscenes-thotdexe).
+Opcodes, spawn records, and `CCTB` → `camALL` binds: [events-detailed.md](events-detailed.md). How those scripts play as in-engine cutscenes (no FMV): [cutscenes.md](cutscenes.md).
 
-Decomp: root table `DAT_00d5a5d0`. `FUN_00422808` counts scenes per stage for the debug UI (stops at the first `-1` / `0xFFFFFFFF`). Gameplay bind is `0x4c0d3c`; the tick at `0x4c0db0` dispatches `handlers[opcode]` at `0x005eeac0`.
+Decomp: root table `DAT_00d5a5d0`. `CountStagesForSelectUi` (`FUN_00422808`) counts scenes per stage for the debug UI (stops at the first `-1` / `0xFFFFFFFF`). Gameplay bind is `BindEventPlayhead` (`0x4c0d3c`); the tick at `TickEventVm` (`0x4c0db0`) dispatches `handlers[opcode]` at `0x005eeac0`.
 
 ### Container
 
@@ -852,7 +1190,7 @@ At each scene pointer: a list of `u32` event offsets, stopped by `0xFFFFFFFF`. E
 
 Each event is a `u32` opcode stream. `0xFFFFFFFF` ends an `ENTB`-style pointer list **and**, at an instruction boundary, the event itself. Spawn records often sit in the bytes after the script until the next section. Do **not** treat the first `0xFFFFFFFF` as the event end — that was the old dump’s truncation.
 
-Camera rails live in a separate bank (`camALL.rbh`). A `CCTB` job `0x40` names a group index + frame window — see [Events in detail](#events-in-detail-vm-opcodes-spawns-cameras) and [Cameras](#cameras-camallrbh).
+Camera rails live in a separate bank (`camALL.rbh`). A `CCTB` job `0x40` names a group index + frame window — see [events-detailed.md](events-detailed.md) and [cameras.md](cameras.md).
 
 ### Null vs zero
 
@@ -861,14 +1199,14 @@ Event tables use **`0xFFFFFFFF` as null / terminator**. Do not confuse with worl
 ### How the tool works
 
 ```text
-bun run index.ts -e|--evt <file.rbh> [outdir]
+uv run hotd-decompress -e|--evt <file.rbh> [outdir]
 ```
 
-`convertEventsToJson` (`src/event.ts`) uses `loadRbh` (no PACK expand). Retail `evtALL.rbh` is already BODY.
+`convert_events_to_json` (`src/hotd_decompress/event.py`) uses `load_rbh` (no PACK expand). Retail `evtALL.rbh` is already BODY.
 
 1. Require one BODY whose first pointer looks like a root table (`firstPtr ≤ 0x400`, 4-aligned, in-range).
 2. Read `firstPtr/4` stage slots, keeping mid-list `0xFFFFFFFF`.
-3. For each live stage: `readPointerTable` for scenes (stop at `0xFFFFFFFF`).
+3. For each live stage: `read_pointer_table` for scenes (stop at `0xFFFFFFFF`).
 4. Collect every section offset; bound each by the next offset in BODY order.
 5. Walk opcodes (names from exe `0x5a3a00`). Deref `ENTB*` spawn records and `CCTB` job `0x40` rail binds.
 6. Write `events.json`. Default dir: `decompressed_assets/<stem>_evt/`.
@@ -916,13 +1254,13 @@ JSON shape:
 }
 ```
 
-`ops[].spawns` holds deref’d `ENTB*` records (`typeId`, XYZ, `spawnEventId`, …). `ops[].camera` on `CCTB` job `0x40` has `camGroup` / `startFrame` / `endFrame` / `flags` indexing `camALL.rbh`. Empty root slots appear as `"offset": null, "scenes": []`.
+`ops[].spawns` holds deref’d `ENTB*` records (`typeId`, XYZ floats, `rx`/`ry`/`rz` integer angle words, `spawnEventId`, …). `ops[].camera` on `CCTB` job `0x40` has `camGroup` / `startFrame` / `endFrame` / `flags` indexing `camALL.rbh`. Empty root slots appear as `"offset": null, "scenes": []`. The file is `jsonutil.write_json`: whole floats such as spawn XYZ print as `n.0`. Angle words print as integers.
 
 ---
 
 ## Events in detail (VM, opcodes, spawns, cameras)
 
-Container and pointer graph: [Events](#events-evtallrbh). Camera rails: [Cameras](#cameras-camallrbh). How a sequence plays (no FMV): [Cutscenes](#cutscenes-thotdexe).
+Container and pointer graph: [events.md](events.md). Camera rails: [cameras.md](cameras.md). How a sequence plays (no FMV): [cutscenes.md](cutscenes.md).
 
 This note is the **bytecode** inside each section: opcode names from `THOTD.exe`, spawn records, and how `CCTB` names a `camALL.rbh` group. Retail dump checked: 9 stage slots, 66 scenes, 522 events, 7660 ops, 1653 spawns, 993 rail binds.
 
@@ -930,7 +1268,7 @@ This note is the **bytecode** inside each section: opcode names from `THOTD.exe`
 
 #### Load
 
-`FUN_00418aa0` requests `evt\allstage\evtall.rbh`. `DAT_00d5a5d0 = *(handle + 4)` is the BODY base.
+`LoadStageAssets` (`FUN_00418aa0`) requests `evt\allstage\evtall.rbh`. `DAT_00d5a5d0 = *(handle + 4)` is the BODY base.
 
 Packed playhead bytes:
 
@@ -941,7 +1279,7 @@ Packed playhead bytes:
 | `DAT_00da0cf0` | EventNo (section index) |
 | `DAT_00da0ab8` | PC (pointer into BODY) |
 
-Bind (`0x4c0d3c`):
+Bind (`BindEventPlayhead` (`0x4c0d3c`)):
 
 ```
 PC = stages[StageNo][SceneNo][EventNo]
@@ -961,11 +1299,11 @@ Debug UI names at `s_Stage_01_005ce918` / `PTR_s_Scene_000_005ceba4`:
 | 7 | *(null)* | 0 |
 | 8 | extra (no UI label) | 6 |
 
-`FUN_00422808` (stage-select) counts until the **first** `0xFFFFFFFF`, so it only sees slots 0–6. Gameplay indexes by StageNo directly; slot 8 is reachable if that byte is set.
+`CountStagesForSelectUi` (`FUN_00422808`) (stage-select) counts until the **first** `0xFFFFFFFF`, so it only sees slots 0–6. Gameplay indexes by StageNo directly; slot 8 is reachable if that byte is set.
 
 #### Tick
 
-`0x4c0db0`: `opcode = *PC`; `call handlers[opcode]` at `DAT_005eeac0`. Names sit in DGROUP at `0x5a3a00` (`0x00 : nop` … `0x5d : NEXTEV`).
+`TickEventVm` (`0x4c0db0`): `opcode = *PC`; `call handlers[opcode]` at `DAT_005eeac0`. Names sit in DGROUP at `0x5a3a00` (`0x00 : nop` … `0x5d : NEXTEV`).
 
 `DAT_00da0a98` is the yield flag. A wait op sets it and returns; the next frame retries the same opcode until the condition holds, then advances PC.
 
@@ -973,7 +1311,7 @@ Debug UI names at `s_Stage_01_005ce918` / `PTR_s_Scene_000_005ceba4`:
 
 EventNo is the **section index**. It is not the old JSON `eventId` field (that was a one-word opcode, usually `NEXTEV` / `CLTB` / `KGTB`).
 
-A different id lives on spawned entities at `+0xd4` (from the spawn record’s `+0x24` byte). Enemy/prop helpers (`FUN_004812e4`, `FUN_00482bf8`) switch on that.
+A different id lives on spawned entities at `+0xd4` (from the spawn record’s `+0x24` byte). Enemy/prop helpers (`EnemyHelperBySpawnEventId` (`FUN_004812e4`), `SpawnSecondaryWave` (`FUN_00482bf8`)) switch on that.
 
 ### Stream layout
 
@@ -985,7 +1323,7 @@ Most immediates are `opcode + one u32` (PC += 8). `WAIT_CAMJOB` / `SCNINIT` / `N
 
 ### Opcode table
 
-Handler `LAB_00471658` is idle (does not advance PC). Those slots are **nop** in the exe strings and do not appear as real script ops. The tool stops if it hits an unknown word (spawn payload / padding).
+Handler `EventVmNop` (`LAB_00471658`) is idle (does not advance PC). Those slots are **nop** in the exe strings and do not appear as real script ops. The tool stops if it hits an unknown word (spawn payload / padding).
 
 | Op | Name | Encoding | Role |
 |----|------|----------|------|
@@ -1031,7 +1369,7 @@ Handler `LAB_00471658` is idle (does not advance PC). Those slots are **nop** in
 | `0x55` | `WAIT_ENALV` | +1 | Wait until enemies-alive ≤ arg |
 | `0x57` | `RNWCJ` | +2 | Renew camera job / bump wait counter (`arg1` often `0xFFFFFFFF`) |
 | `0x58` | `ITEMON` | +1 | Enable item flag at `DAT_00d9f618[arg]` |
-| `0x5a` | `SNDON` | +1 | Play digital SFX (`FUN_00412000`) |
+| `0x5a` | `SNDON` | +1 | Play a sound-request row (`PlayDigitalSfx` (`FUN_00412000`)). Arg is a `DAT_005cbda8` index, not a filename — [cutscene-audio.md](cutscene-audio.md) |
 | `0x5b` | `ATCMD` | +1 | Attract-mode command |
 | `0x5c` | `WAIT` | 0 | Yield forever (does not advance PC) |
 | `0x5d` | `NEXTEV` | 0 | Next event / scene |
@@ -1040,7 +1378,7 @@ Retail histogram (top): `CCTB` 1718, `WAIT_CAMJOB` 728, `NEXTEV` 521, `WAIT_CAMF
 
 ### Spawn records (`ENTB*`)
 
-List operands are **BODY offsets**, not inline coordinates. `ENTB` (`0x46e5c8`) reads each pointer, looks up `DAT_005d8118[typeId]` (spawn function), and copies the record into a new entity (`FUN_0043e400`).
+List operands are **BODY offsets**, not inline coordinates. `ENTB` (`EvtOpEntb` (`0x46e5c8`)) reads each pointer, looks up `DAT_005d8118[typeId]` (spawn function), and copies the record into a new entity (`AllocEntity` (`FUN_0043e400`)).
 
 #### `ENTB` / `ET*` / `ENTB3` (0x28 bytes)
 
@@ -1051,9 +1389,9 @@ offset  size  field
 0x08    4     f32 x
 0x0C    4     f32 y
 0x10    4     f32 z
-0x14    4     f32 rx
-0x18    4     f32 ry
-0x1C    4     f32 rz
+0x14    4     u32 rx         integer full-circle angle word → entity+0x34
+0x18    4     u32 ry         integer full-circle angle word → entity+0x38
+0x1C    4     u32 rz         integer full-circle angle word → entity+0x3C
 0x20    1     posMode        low 2 bits: 0 = raw XYZ, 1/2 = transform
 0x22    2     u16 combat HP  copied to entity+0x7a **and** +0x78 (drained on hit)
 0x24    1     spawnEventId   → entity+0xd4
@@ -1062,7 +1400,11 @@ offset  size  field
 0x27    1     u8             ENTB3 → entity+0x32c
 ```
 
-`typeId` is a spawn-function index (**136** live slots in this `THOTD.exe`, max 256), **not** the 94-row creature table in [Creatures](#creatures-exe-types--creat-ids--vvtp-pages). `spawnEventId` is the byte those creature helpers switch on.
+`typeId` is a spawn-function index (**136** live slots in this `THOTD.exe`, max 256), **not** the 94-row creature table in [creatures.md](creatures.md). `spawnEventId` is the byte those creature helpers switch on.
+
+XYZ are IEEE floats. **RX/RY/RZ are integer angle words**, not floats (`65536 = 360°`). `EvtOpEntb` (`FUN_0046e5c8`) at `0x46E749–0x46E758` copies the three dwords at record `+0x14/+0x18/+0x1C` directly to entity `+0x34/+0x38/+0x3C`. The corpus is dominated by full-circle values such as `0x4000` / `0x8000` / `0xC000`. Scene 002’s two slot-102 records use `(0, 0xD000, 0)` and `(0, 0x3000, 0)`. Exporting those words as `f32` yields ~`7.46e-41` / ~`1.72e-41`. `-e` keeps the integer bits.
+
+This note is **bytecode decode**, not VM execution. The tool walks opcodes and writes JSON; it does not run `TickEventVm` (`FUN_004c0db0`). Zero `undecoded` words does not prove every payload byte was understood: the walker stops at an unsupported opcode and treats the rest as trailing spawn bytes.
 
 #### `ENTB2` (8 bytes)
 
@@ -1073,13 +1415,13 @@ offset  size  field
 
 #### `ENTBE` (≥ 0x24 bytes)
 
-Same 6 floats as `ENTB`, then `u16` at `+0x20`. The handler stores `record+0x24` at `entity+0x364` (extra payload pointer).
+Same XYZ floats and RX/RY/RZ integer angle words as `ENTB`, then `u16` at `+0x20`. The handler stores `record+0x24` at `entity+0x364` (extra payload pointer).
 
 XYZ is stage space (same as world meshes / camera rails). Example from Stage 01 event 4: type 100 at `(17, -25, -1125)` and `(-30, -25, -1165)`, `spawnEventId` 19 and 17.
 
 ### `CCTB` → `camALL` groups
 
-`CCTB` does not embed splines. It queues the current instruction onto a 16-slot ring (`DAT_00d9f1f0`). `FUN_0045f414` reads `*(PC+4)` as a **camera job type** and dispatches `DAT_005d8418[job]`.
+`CCTB` does not embed splines. It queues the current instruction onto a 16-slot ring (`DAT_00d9f1f0`). `DispatchCameraJob` (`FUN_0045f414`) reads `*(PC+4)` as a **camera job type** and dispatches `DAT_005d8418[job]`.
 
 Word count including opcode:
 
@@ -1099,14 +1441,14 @@ n = ((job / 16) * 4 + 8) / 4
 | `0x21` | 4 | `camMode2` | 2 args |
 | `0x40` | 6 | `rail` | start, end, **camGroup**, flags |
 
-Job `0x40` (`FUN_00460f88` → `FUN_00460fd0`) is the rail bind:
+Job `0x40` (`BindCameraRailJob` (`FUN_00460f88`) → `BindCameraRail` (`FUN_00460fd0`)) is the rail bind:
 
 | Word | Copied to | Meaning |
 |------|-----------|---------|
 | start | `DAT_00d9ed04` / slot `+0x120` | Start frame (`−1` keeps current `t`) |
 | end | `DAT_00d9ed08` / slot `+0x124` | End frame (tick while `t < end`) |
 | camGroup | `DAT_00da0ca4` / slot `+0x128` | `camALL.rbh` group index 0–141 |
-| flags | `DAT_00d9ed10` / slot `+0x12C` | Bit 1 (`2`) changes bind behaviour |
+| flags | `DAT_00d9ed10` / slot `+0x12C` | Bind flags. The update at `0x461171` tests mask **4**. Mask **2** is common in rail data and is a different bit — do not collapse the two |
 
 Retail: 993 `rail` binds, 117 distinct groups, indices 0–141 (the full `camALL` range). Typical pattern:
 
@@ -1136,22 +1478,40 @@ NEXTEV
 
 Event 4 later binds `camALL` group 0 at frames 741–770, spawns two type-100 enemies, then group 1 at 801–890.
 
-### How the tool works (decode)
+### Example (Stage 01, `Scene 002` — gameplay corridor)
 
-```text
-bun run index.ts -e|--evt <file.rbh> [outdir]
+Scene-to-scene setup is event 0 (`SNDON 9` / `CHGSM 6` / `NEXTEV`). Events 1–2 are the corridor:
+
+```
+SCNINIT
+FKRTB    ptr → floor Y
+SKYTB    1
+ENTB     typeId 102
+CCTB rail g3 [0,80)
+WAIT_CAMFRM 70 / RNWCJ
+WAIT_ENALV 0
+CAMDR    3
+NEXTEV
 ```
 
-`convertEventsToJson` (`src/event.ts`):
+Then another type-102 spawn, group 3 `[81,150)` with `WAIT_ENALV 0`, then a 9-frame exit `[151,160)`. Three rail binds. That is the `WAIT_ENALV`-after-rail pattern from [cutscenes.md](cutscenes.md). The two slot-102 records use angle words `(0, 0xD000, 0)` and `(0, 0x3000, 0)`.
 
-1. Same root/scene/section pointer walk as [Events](#events-evtallrbh).
+### How the tool works
+
+```text
+uv run hotd-decompress -e|--evt <file.rbh> [outdir]
+```
+
+`convert_events_to_json` (`src/hotd_decompress/event.py`):
+
+1. Same root/scene/section pointer walk as [events.md](events.md).
 2. Collect every section offset; bound each by the next offset in BODY order (sections are not always sequential inside a scene).
 3. Walk `u32` opcodes with the table above. List ops consume pointers until `0xFFFFFFFF`. `CCTB` size uses the job-type formula.
-4. Deref `ENTB*` pointers into spawn records; deref `WLTB` / `FKRTB` pointers into floats.
+4. Deref `ENTB*` pointers into spawn records (XYZ floats, RX/RY/RZ integer angle words); deref `WLTB` / `FKRTB` pointers into floats.
 5. Job `0x40` becomes `camera: { jobName: "rail", startFrame, endFrame, camGroup, flags }`.
 6. Write `events.json`. Stdout also prints op / spawn / rail-bind counts.
 
-JSON extras vs the raw tree: `name` on stages/scenes (from the exe strings), `ops[]` on each section, `spawns` / `camera` / `floats` on ops. `words` is the script slice only (internal list terminators kept; trailing spawn bytes omitted). The old one-word `eventId` field is gone — that word is `ops[0].name`.
+JSON extras vs the raw tree: `name` on stages/scenes (from the exe strings), `ops[]` on each section, `spawns` / `camera` / `floats` on ops. `words` is the script slice only (internal list terminators kept; trailing spawn bytes omitted). The old one-word `eventId` field is gone — that word is `ops[0].name`. `jsonutil.write_json` prints whole floats as `n.0`.
 
 ---
 
@@ -1161,7 +1521,7 @@ JSON extras vs the raw tree: `name` on stages/scenes (from the exe strings), `op
 
 Retail file checked: 142 groups, 852 tracks (always 6 per group). Already uncompressed (`BODY` + `RELC`).
 
-Decomp / exe: `FUN_00418aa0` loads `cam\allstage\camall.rbh` into `DAT_00d5a5c8` (BODY pointer). `FUN_00460fd0` binds a group + frame window. `FUN_004caa70` ticks; `FUN_00461980` samples six tracks; `FUN_00461858` is the cubic Hermite lookup; `FUN_00461a30` turns eye−look-at into yaw/pitch. Event VM + rail playback (title / attract / ending): [Cutscenes](#cutscenes-thotdexe).
+Decomp / exe: `LoadStageAssets` (`FUN_00418aa0`) loads `cam\allstage\camall.rbh` into `DAT_00d5a5c8` (BODY pointer). `BindCameraRail` (`FUN_00460fd0`) binds a group + frame window. `TickCameraRail` (`FUN_004caa70`) ticks; `SampleCameraGroupTracks` (`FUN_00461980`) samples six tracks; `HermiteTrackLookup` (`FUN_00461858`) is the cubic Hermite lookup; `EyeLookAtToYawPitch` (`FUN_00461a30`) turns eye−look-at into yaw/pitch. Event VM + rail playback (title / attract / ending): [cutscenes.md](cutscenes.md).
 
 ### Container
 
@@ -1185,7 +1545,7 @@ BODY0
 
 Root slots that are `0xFFFFFFFF` are skipped. Group tables are dense: the first track begins immediately after the group’s pointer list, so the track count is implied by that gap (same “child sits right after the table” rule as sprite/event roots).
 
-The exe always reads **six** pointers at group `+0,+4,+8,+0xC,+0x10,+0x14`. Retail `camALL.rbh` matches that (142 × 6). Generic RBH inspect (`readPointerTable` until `0xFFFFFFFF` / out-of-BODY) can over-count by walking into key data — a track header `keyCount|channelId<<16` can look like an in-range pointer. Trust `-c` / `src/camera.ts`, not the inspect entry count, for camera groups.
+The exe always reads **six** pointers at group `+0,+4,+8,+0xC,+0x10,+0x14`. Retail `camALL.rbh` matches that (142 × 6). Generic RBH inspect (`read_pointer_table` until `0xFFFFFFFF` / out-of-BODY) can over-count by walking into key data — a track header `keyCount|channelId<<16` can look like an in-range pointer. Trust `-c` / `src/hotd_decompress/camera.py`, not the inspect entry count, for camera groups.
 
 ### Track
 
@@ -1196,7 +1556,7 @@ offset  size  field
 0x04    …     Key[keyCount]
 ```
 
-`FUN_00461858` uses the low u16 as the key count (binary search starts at `keyCount/2`) and the high u16 minus one as the search iteration count. On all 852 retail tracks, `channelId == log2(keyCount)`.
+`HermiteTrackLookup` (`FUN_00461858`) uses the low u16 as the key count (binary search starts at `keyCount/2`) and the high u16 minus one as the search iteration count. On all 852 retail tracks, `channelId == log2(keyCount)`.
 
 **Pose channels are track order**, not `channelId`:
 
@@ -1221,7 +1581,7 @@ offset  size  field
 0x0C    4     f32 slopeOut   outgoing tangent (used as m0 of the next span)
 ```
 
-Cubic Hermite between `keys[i-1]` and `keys[i]`: previous `slopeOut` + current `slopeIn`. Engine doubles at `0x005a2a0c` are `2.0`, `3.0`, `−2.0` (Hermite basis). The sampler converts the integer frame to float (`fild` / `FUN_00562400` chop) before the lookup.
+Cubic Hermite between `keys[i-1]` and `keys[i]`: previous `slopeOut` + current `slopeIn`. Engine doubles at `0x005a2a0c` are `2.0`, `3.0`, `−2.0` (Hermite basis). The sampler converts the integer frame to float (`fild` / `FloatChop` (`FUN_00562400`) chop) before the lookup.
 
 Retail spans: 60–2510 frames (mean ~573). Group 80 is the longest (2510). Most rails sit in the 240–960 band.
 
@@ -1229,35 +1589,35 @@ Retail spans: 60–2510 frames (mean ~573). Group 80 is the longest (2510). Most
 
 #### Load
 
-`FUN_00418aa0` (stage asset load) requests `cam\allstage\camall.rbh` via `FUN_005769c0`. `DAT_00d5a5c8 = *(handle + 4)` is the BODY base. `FUN_00461980` indexes `group = *(DAT_00d5a5c8 + groupIndex * 4)`.
+`LoadStageAssets` (`FUN_00418aa0`) (stage asset load) requests `cam\allstage\camall.rbh` via `LoadPiffRbh` (`FUN_005769c0`). `DAT_00d5a5c8 = *(handle + 4)` is the BODY base. `SampleCameraGroupTracks` (`FUN_00461980`) indexes `group = *(DAT_00d5a5c8 + groupIndex * 4)`.
 
 #### Bind (event → rail)
 
-Camera slots are 0x154 bytes at `DAT_00da01c0` (six slots). Event dispatch (`FUN_0045f414`) copies a script record into slot 0; `FUN_00460fd0` / `FUN_004610b0` promote those fields to the globals the tick uses:
+Camera slots are 0x154 bytes at `DAT_00da01c0` (six slots). Event dispatch (`DispatchCameraJob` (`FUN_0045f414`)) copies a script record into slot 0; `BindCameraRail` (`FUN_00460fd0`) / `PromoteCameraSlotGlobals` (`FUN_004610b0`) promote those fields to the globals the tick uses:
 
 | Slot offset | Copied to | Meaning |
 |-------------|-----------|---------|
 | +0x120 | `DAT_00d9ed04` | Start frame, or `−1` to keep current `t` |
 | +0x124 | `DAT_00d9ed08` | End frame (tick while `t < end`) |
 | +0x128 | `DAT_00da0ca4` | `camALL` group index (0–141) |
-| +0x12C | `DAT_00d9ed10` | Flags (bit 2 = 4 changes bind behaviour) |
-| +0x14C | — | Current `t` as float, used when start is `−1` |
+| +0x12C | `DAT_00d9ed10` | Flags. The bind-update at `0x461171` tests mask **4**. Mask **2** appears often in rail data and is a different bit — do not treat them as one bind-behaviour flag |
+| +0x14C | — | Current `t` as float. When start is `−1`, `PromoteCameraSlotGlobals` (`FUN_004610b0`) at `0x4610AC` loads this word, converts to integer, **increments it**, and stores the global frame (`0x4610E3–0x4610F5`) |
 | +0x60 / +0x78 | slot-local | Per-slot eye / look-at sample buffers |
 
 Slot 0 is special: binding it also pokes the event-script state machine (`DAT_00da0ab0`). Remaining frames (`end − t`) live in `DAT_00da0bf8`.
 
-Events and cameras stay in **separate files**. A `CCTB` job `0x40` names a group and a frame window; `evtALL.rbh` does not embed spline keys. Opcode layout: [Events in detail](#events-in-detail-vm-opcodes-spawns-cameras).
+Events and cameras stay in **separate files**. A `CCTB` job `0x40` names a group and a frame window; `evtALL.rbh` does not embed spline keys. Opcode layout: [events-detailed.md](events-detailed.md).
 
 #### Tick
 
-`FUN_004caa70`:
+`TickCameraRail` (`FUN_004caa70`):
 
 1. If `DAT_00d9ed04 < DAT_00d9ed08`, and the game is not paused (`DAT_00da0a80 == 0` and `DAT_00da0b5c ≠ 0`), increment the frame counter.
 2. `EAX = DAT_00da0ca4` (group index); sample six tracks into `DAT_00d9ed18` (eye) and `DAT_00d9ed30` (look-at).
-3. `FUN_00461a30`: direction = eye − look-at → fixed-point yaw/pitch (×16). Negate yaw, add `0x8000` to pitch, roll = 0.
-4. `FUN_0048a15c`: raycast from `(eye.x, 32768, eye.z)` onto the stage mesh. Player XZ follows the camera; Y comes from the ground hit. Pitch copied to `DAT_00d9f048`.
+3. `EyeLookAtToYawPitch` (`FUN_00461a30`): direction = eye − look-at → fixed-point yaw/pitch (×16). Negate yaw, add `0x8000` to pitch, roll = 0.
+4. `RaycastStageFloor` (`FUN_0048a15c`): raycast from `(eye.x, 32768, eye.z)` onto the stage mesh. Player XZ follows the camera; Y comes from the ground hit. Pitch copied to `DAT_00d9f048`.
 
-Sibling `FUN_004cab60` does the same sample but copies eye XYZ into the player position (`DAT_00d9f038/03c/040`), with optional Y from `DAT_00da0b48` instead of the ground raycast.
+Sibling `TickCameraRailPlantEye` (`FUN_004cab60`) does the same sample but copies eye XYZ into the player position (`DAT_00d9f038/03c/040`), with optional Y from `DAT_00da0b48` instead of the ground raycast.
 
 #### Layers on top of the rail
 
@@ -1265,20 +1625,22 @@ These do **not** add tracks to `camALL.rbh`:
 
 | System | Function | Behaviour |
 |--------|----------|-----------|
-| Six view slots | `FUN_0045f140` | Builds a view matrix per slot from `DAT_00da0220` (stride 0x154). `DAT_00da0bd0` is the live camera: 0 = gameplay (`FUN_00461adc`), 2 = title/alt (`FUN_00461b90`). |
-| 2P aim blend | `FUN_004609e4` | Averages P1/P2 entity points (`DAT_00da0044` / `0058` at +0x2DC) into `DAT_00da0c74`. Falls back to the rail look-at if neither gun entity is live. |
-| Zoom / FOV | `FUN_00461690` | Compares camera-forward to that aim point. 16-bit zoom word in `DAT_00da0c04`, clamped to `0x10`–`0x40`. High half `0xFFFF` disables auto-zoom. |
-| Shake | `FUN_004ca884` | Decaying offset for 30 frames (`DAT_00d9ed5c`) into `DAT_00d9f038/03c/040` when `DAT_00d9ed54` is set. |
-| Chase / panic | `FUN_004bd4a8` → `FUN_004bd678` | Separate entity state machine: ease aim toward the crosshair while path progress &lt; 1.0, then a timed wait and optional homing spawn. Hijacks the live camera entity. |
-| Gun-aim jitter | `FUN_0049cad0` | Same 6-track Hermite sampler on a **different** table, scaled into screen-space wobble by view quadrant. |
+| Six view slots | `BuildViewSlotMatrices` (`FUN_0045f140`) | Builds a view matrix per slot from `DAT_00da0220` (stride 0x154). `DAT_00da0bd0` is the live camera: 0 = gameplay (`GameplayCameraView` (`FUN_00461adc`)), 2 = title/alt (`TitleCameraView` (`FUN_00461b90`)). |
+| 2P aim blend | `BlendTwoPlayerAim` (`FUN_004609e4`) | Averages P1/P2 entity points (`DAT_00da0044` / `0058` at +0x2DC) into `DAT_00da0c74`. Falls back to the rail look-at if neither gun entity is live. |
+| Zoom / FOV | `UpdateCameraZoom` (`FUN_00461690`) | Compares camera-forward to that aim point. 16-bit zoom word in `DAT_00da0c04`, clamped to `0x10`–`0x40`. High half `0xFFFF` disables auto-zoom. |
+| Shake | `ApplyCameraShake` (`FUN_004ca884`) | Decaying offset for 30 frames (`DAT_00d9ed5c`) into `DAT_00d9f038/03c/040` when `DAT_00d9ed54` is set. |
+| Chase / panic | `StartChasePanicCamera` (`FUN_004bd4a8`) → `TickChasePanicCamera` (`FUN_004bd678`) | Separate entity state machine: ease aim toward the crosshair while path progress &lt; 1.0, then a timed wait and optional homing spawn. Hijacks the live camera entity. |
+| Gun-aim jitter | `GunAimJitter` (`FUN_0049cad0`) | Same 6-track Hermite sampler on a **different** table, scaled into screen-space wobble by view quadrant. |
 
-### How the tool works (`-c`)
+Projection scale at the camera object `+0x20` (X) and `+0x24` (Y) is what `ProjectVerticesWithClip` (`FUN_005792b0`) multiplies into screen X/Y. Those floats track live zoom from `UpdateCameraZoom` (`FUN_00461690`): the 16-bit word `DAT_00da0c04` is clamped to `0x10`–`0x40`, and `DAT_00da0c06` is an override. They are recomputed from the aim point (`BlendTwoPlayerAim` (`FUN_004609e4`)), which falls back to the rail look-at when no gun is live. They are not a stage FOV constant in `camALL.rbh`.
+
+### How the tool works
 
 ```text
-bun run index.ts -c|--cam <file.rbh> [outdir]
+uv run hotd-decompress -c|--cam <file.rbh> [outdir]
 ```
 
-`convertCamerasToJson` (`src/camera.ts`) uses `loadRbh` (no PACK expand). Retail `camALL.rbh` is already BODY.
+`convert_cameras_to_json` (`src/hotd_decompress/camera.py`) uses `load_rbh` (no PACK expand). Retail `camALL.rbh` is already BODY.
 
 1. Require one BODY that looks like a root pointer table (`firstPtr ≤ 0x1000`).
 2. `groupCount = firstPtr / 4`. Skip `0xFFFFFFFF` slots.
@@ -1288,7 +1650,9 @@ bun run index.ts -c|--cam <file.rbh> [outdir]
 
 Stdout: group count, total tracks, output path.
 
-The tool does not evaluate the Hermite spline; it dumps keys. `channelId` is left numeric (`log2(keyCount)` in retail data). Track index 0–5 is the pose mapping.
+The `-c` dump does not evaluate the Hermite spline; it writes keys. `sample_track` / `sample_camera_group` in `src/hotd_decompress/camera.py` implement `HermiteTrackLookup` (`FUN_00461858`) (cubic Hermite; previous `slopeOut` + current `slopeIn`). Pose channels are track order 0–2 eye, 3–5 look-at, not `channelId`. `channelId` is left numeric (`log2(keyCount)` in retail data). `cameras.json` is `jsonutil.write_json`, so whole-valued key floats print as `n.0`.
+
+`src/hotd_decompress/rail_timeline.py` walks `evtALL` CCTB job-`0x40` binds in file order, resolves `startFrame == 0xFFFFFFFF` to the last end frame seen for that `camGroup`, and can sample `[start, end)`. Branch ops are ignored, so binds in one scene play back-to-back.
 
 JSON shape:
 
@@ -1315,7 +1679,7 @@ JSON shape:
 }
 ```
 
-To play a rail in a viewer: evaluate the six tracks at integer frame `t` with cubic Hermite, place the camera at tracks 0–2, look at tracks 3–5 (Y-up as in the mesh exporter). Overlay zoom / shake / 2P blend only if matching the exe rather than the authored path.
+To play a rail in a viewer: call `sample_camera_group` at integer frame `t`, place the camera at tracks 0–2, look at tracks 3–5 (Y-up as in the mesh exporter). `collect_rail_segments` resolves a `−1` start to the previous end for that group. Overlay zoom / shake / 2P blend only if matching the exe rather than the authored path.
 
 ---
 
@@ -1323,7 +1687,7 @@ To play a rail in a viewer: evaluate the six tracks at integer frame `t` with cu
 
 How the PC / Tantalus engine **plays** a scripted sequence. There is no FMV, AVI, or other movie file in the asset tree. A “cutscene” is the same 3D world as gameplay: an event script (`evtALL.rbh`) binds a camera rail (`camALL.rbh`), spawns actors, plays digital SFX, and the frame pump draws meshes / sprites as usual.
 
-This note is **not** a CLI flag. On-disk layouts stay in [Events](#events-evtallrbh), [Events in detail](#events-in-detail-vm-opcodes-spawns-cameras), and [Cameras](#cameras-camallrbh). The draw path is [Game rendering](#game-rendering-thotdexe). Decomp: `hotd-decomp/THOTD-exe-commented.c`.
+This note is **not** a CLI flag. On-disk layouts stay in [events.md](events.md), [events-detailed.md](events-detailed.md), and [cameras.md](cameras.md). The draw path is [game-rendering.md](game-rendering.md). Decomp: `hotd-decomp/THOTD-exe-commented.c`.
 
 Retail dump checked: 9 stage slots, 66 scenes, 522 events, 993 rail binds, 142 `camALL` groups.
 
@@ -1339,11 +1703,11 @@ Every sequence the player watches is an **event section** (opcode stream) under 
 
 The engine does not switch to a movie player. `CHGSM` (change system mode) and `ATCMD` (attract-mode command) only poke globals; they do not load another container.
 
-CD music is MCI `cdaudio` in the exe. It is **not** in `assets/sound/` and is not keyed from `evtALL`. Digital voice / SFX in a sequence are `SNDON` → `FUN_00412000` (`O_*.rbh` / `gamesnds.rbh`).
+CD music is MCI `cdaudio` in the exe. It is **not** in `assets/sound/` and is not keyed from `evtALL`. Digital voice / SFX in a sequence are `SNDON` → `PlayDigitalSfx` (`FUN_00412000`) (`O_*.rbh` / `gamesnds.rbh`).
 
 ### Who owns the playhead
 
-Packed bytes ([Events in detail](#events-in-detail-vm-opcodes-spawns-cameras)):
+Packed bytes ([events-detailed.md](events-detailed.md)):
 
 | Address | Role |
 |---------|------|
@@ -1352,13 +1716,13 @@ Packed bytes ([Events in detail](#events-in-detail-vm-opcodes-spawns-cameras)):
 | `DAT_00da0cf0` | EventNo (section index inside the scene) |
 | `DAT_00da0ab8` | PC (pointer into the event BODY) |
 
-Bind (`0x4c0d3c`):
+Bind (`BindEventPlayhead` (`0x4c0d3c`)):
 
 ```
 PC = stages[StageNo][SceneNo][EventNo]
 ```
 
-`FUN_00418aa0` (stage asset load) fills the 7500-slot mesh table, then requests `cam\allstage\camall.rbh` (`DAT_00d5a5c8`) and `evt\allstage\evtall.rbh` (`DAT_00d5a5d0`). World mesh path is `ART\STAGE%d\WORLD\WORLD_%d.RBH` with the same StageNo (clamped: slots 0–3 → stages 1–4; slots 4–5 → stage 5; slot 6 → 6; anything else → 1). Title / attract / ending scripts still run against whatever world that clamp loaded.
+`LoadStageAssets` (`FUN_00418aa0`) (stage asset load) fills the 7500-slot mesh table, then requests `cam\allstage\camall.rbh` (`DAT_00d5a5c8`) and `evt\allstage\evtall.rbh` (`DAT_00d5a5d0`). World mesh path is `ART\STAGE%d\WORLD\WORLD_%d.RBH` with the same StageNo (clamped: slots 0–3 → stages 1–4; slots 4–5 → stage 5; slot 6 → 6; anything else → 1). Title / attract / ending scripts still run against whatever world that clamp loaded.
 
 Debug UI names (`s_Stage_01_005ce918` / `PTR_s_Scene_000_005ceba4`):
 
@@ -1371,21 +1735,21 @@ Debug UI names (`s_Stage_01_005ce918` / `PTR_s_Scene_000_005ceba4`):
 | 7 | *(null)* | 0 | Unused. |
 | 8 | extra | 6 | Reachable if StageNo is set; copies late Stage 01 scenes. |
 
-`FUN_00422808` (stage-select) only counts until the first `0xFFFFFFFF`, so the UI sees slots 0–6. Gameplay indexes StageNo directly.
+`CountStagesForSelectUi` (`FUN_00422808`) (stage-select) only counts until the first `0xFFFFFFFF`, so the UI sees slots 0–6. Gameplay indexes StageNo directly.
 
 ### Per-frame playback
 
-Idle pump `FUN_00562e30` draws; gameplay tick `FUN_00458b7c` (from `FUN_00458720`) updates entities and camera **before** that draw. A scripted beat is four machines on the same frame:
+Idle pump `IdleFramePump` (`FUN_00562e30`) draws; gameplay tick `TickGameplay` (`FUN_00458b7c`) (from `TickGameplayParent` (`FUN_00458720`)) updates entities and camera **before** that draw. A scripted beat is four machines on the same frame:
 
 ```
 event VM tick          camera job ring           rail sampler              draw pump
-0x4c0db0               FUN_0045f414              FUN_004caa70              FUN_00568350
+TickEventVm            DispatchCameraJob         TickCameraRail            DrawEnabledCameras
 handlers[opcode]       DAT_005d8418[job]         six Hermite tracks        vtable +0x24
        │                      │                         │                        │
        ├─ CCTB 0x40 ──────────► bind group + [start,end]
        ├─ WAIT_CAMJOB ────────► yield until ring empty
        ├─ ENTB* ──────────────► spawn into DAT_00d53080 instances
-       └─ SNDON ──────────────► FUN_00412000
+       └─ SNDON ──────────────► PlayDigitalSfx
                                                         │
                                                         ├─ eye / look-at → yaw/pitch
                                                         ├─ plant player on floor
@@ -1394,7 +1758,7 @@ handlers[opcode]       DAT_005d8418[job]         six Hermite tracks        vtabl
 
 #### 1. Event VM
 
-Tick at `0x4c0db0`: `opcode = *PC`; `call handlers[opcode]` at `DAT_005eeac0`. Names at `0x5a3a00`.
+Tick at `TickEventVm` (`0x4c0db0`): `opcode = *PC`; `call handlers[opcode]` at `DAT_005eeac0`. Names at `0x5a3a00`.
 
 `DAT_00da0a98` is the yield flag. A wait op sets it and returns; the next frame retries the same opcode until the condition holds, then advances PC. That is how a cutscene **holds**: the script does not sleep the process; it spins on `WAIT_CAMJOB` / `WAIT_CAMFRM` / `WAIT_FRM` / `WAIT_ITEM` while the camera and entities keep ticking.
 
@@ -1423,14 +1787,14 @@ Retail `CHGSM` args (change system mode; 169 uses): **6** (69, scene-to-scene), 
 
 #### 2. Camera job ring
 
-`CCTB` queues the current instruction onto a 16-slot ring (`DAT_00d9f1f0`). `FUN_0045f414` reads `*(PC+4)` as the job type and dispatches `DAT_005d8418[job]`. Job `0x40` (`FUN_00460f88` → `FUN_00460fd0`) is the rail bind:
+`CCTB` queues the current instruction onto a 16-slot ring (`DAT_00d9f1f0`). `DispatchCameraJob` (`FUN_0045f414`) reads `*(PC+4)` as the job type and dispatches `DAT_005d8418[job]`. Job `0x40` (`BindCameraRailJob` (`FUN_00460f88`) → `BindCameraRail` (`FUN_00460fd0`)) is the rail bind:
 
 | Word | Copied to | Meaning |
 |------|-----------|---------|
 | start | `DAT_00d9ed04` | Start frame (`−1` keeps current `t`) |
 | end | `DAT_00d9ed08` | End frame (tick while `t < end`) |
 | camGroup | `DAT_00da0ca4` | `camALL.rbh` group index 0–141 |
-| flags | `DAT_00d9ed10` | Bit 1 (`2`) changes bind behaviour |
+| flags | `DAT_00d9ed10` | Bind flags. The update at `0x461171` tests mask **4**. Mask **2** is a different bit |
 
 Slot 0 of the 0x154-byte camera slots (`DAT_00da01c0`) also pokes the event-script state machine (`DAT_00da0ab0`). Remaining frames (`end − t`) live in `DAT_00da0bf8` (`WAIT_CAMFRM 0` / `RNWCJ` read that).
 
@@ -1445,20 +1809,20 @@ Gameplay often uses the same bind, then `WAIT_ENALV` so the rail and the fight o
 
 #### 3. Rail sampler
 
-`FUN_004caa70` (paused when `DAT_00da0a80 != 0` or `DAT_00da0b5c == 0`):
+`TickCameraRail` (`FUN_004caa70`) (paused when `DAT_00da0a80 != 0` or `DAT_00da0b5c == 0`):
 
 1. If `start < end`, increment the integer frame counter.
-2. Sample six Hermite tracks for group `DAT_00da0ca4` into eye XYZ (`DAT_00d9ed18`) and look-at XYZ (`DAT_00d9ed30`). Lookup is `FUN_00461858`; pose channels are **track order**, not `channelId`.
-3. `FUN_00461a30`: direction = eye − look-at → fixed-point yaw/pitch (×16). Roll = 0.
-4. `FUN_0048a15c`: raycast `(eye.x, 32768, eye.z)` onto the stage mesh. Player XZ follows the camera; Y comes from the ground hit.
+2. Sample six Hermite tracks for group `DAT_00da0ca4` into eye XYZ (`DAT_00d9ed18`) and look-at XYZ (`DAT_00d9ed30`). Lookup is `HermiteTrackLookup` (`FUN_00461858`); pose channels are **track order**, not `channelId`.
+3. `EyeLookAtToYawPitch` (`FUN_00461a30`): direction = eye − look-at → fixed-point yaw/pitch (×16). Roll = 0.
+4. `RaycastStageFloor` (`FUN_0048a15c`): raycast `(eye.x, 32768, eye.z)` onto the stage mesh. Player XZ follows the camera; Y comes from the ground hit.
 
-Zoom, 2P aim blend, and shake sit on top of the rail and do **not** add tracks — [Cameras](#cameras-camallrbh). `DAT_00da0bd0` selects the live camera: `0` = gameplay (`FUN_00461adc`), `2` = title/alt (`FUN_00461b90`).
+Zoom, 2P aim blend, and shake sit on top of the rail and do **not** add tracks ([cameras.md](cameras.md)). `DAT_00da0bd0` selects the live camera: `0` = gameplay (`GameplayCameraView` (`FUN_00461adc`)), `2` = title/alt (`TitleCameraView` (`FUN_00461b90`)).
 
 #### 4. Draw
 
-Same path as any other frame ([Game rendering](#game-rendering-thotdexe)): instance queues → `FUN_00578bb0` prims → software scanline or D3D `DrawIndexedPrimitive`. Sky (`SKYKD` / `SKYTB`), lights (`SHDWLT` / `WLTB`), and `TEXCHG` are event ops that only change globals the submit path reads. Letterbox bands (`FUN_0048769c`, height / `0x180`) and 2P split (`FUN_00487708`) are viewport helpers, not a movie overlay.
+Same path as any other frame ([game-rendering.md](game-rendering.md)): instance queues → `DispatchMeshPrims` (`FUN_00578bb0`) prims → software scanline or D3D `DrawIndexedPrimitive`. Sky (`SKYKD` / `SKYTB`), lights (`SHDWLT` / `WLTB`), and `TEXCHG` are event ops that only change globals the submit path reads. Letterbox bands (`SetLetterboxViewport` (`FUN_0048769c`), height / `0x180`) and 2P split (`SetSplitScreenViewport` (`FUN_00487708`)) are viewport helpers, not a movie overlay.
 
-`DAT_005cd35c != 0` skips 3D submit (load / fade). HUD stamps (`FUN_004434b0`) still run: stage-intro countdown `FUN_0051a8d0` is a **separate** entity state machine (voice / `SPR_Num` bonus / camera tilt) on top of the event script, not an opcode.
+`DAT_005cd35c != 0` skips 3D submit (load / fade). HUD stamps (`StampScrollSprite` (`FUN_004434b0`)) still run: stage-intro countdown `TickStageIntroCountdown` (`FUN_0051a8d0`) is a **separate** entity state machine (voice / `SPR_Num` bonus / camera tilt) on top of the event script, not an opcode.
 
 ### Special stages (title, attract, ending)
 
@@ -1483,11 +1847,11 @@ WAIT_FRM 9999
 NEXTEV
 ```
 
-`Scene 00` is a single `WAIT` — the VM yields forever. Title/attract UI mode 1 (`FUN_004210fc`) and title camera matrices (`FUN_00496f60`) sit beside this script; they are not encoded in `evtALL`.
+`Scene 00` is a single `WAIT` — the VM yields forever. Title/attract UI mode 1 (`TitleAttractUiMode1` (`FUN_004210fc`)) and title camera matrices (`TitleCameraMatrices` (`FUN_00496f60`)) sit beside this script; they are not encoded in `evtALL`.
 
 #### Stage adv (slot 5) — attract / demo reel
 
-One scene, 11 events. No `CHGSM`. Pattern: spawn a few `ENTB2`/`ENTB`/`ENTB3` actors, bind a rail, `WAIT_CAMJOB`, `WAIT_FRM`, `NEXTEV`. Rails used: groups **107–116** (plus 115 with a long 121–520 window). `SNDON 263` opens most beats. Attract/demo tick `FUN_00473e04` / `FUN_00458bd8` can restart or take coin/start; `ATCMD` from scripts is the event-side hook (14 uses, mostly in chapter scenes, not in `adv` itself).
+One scene, 11 events. No `CHGSM`. Pattern: spawn a few `ENTB2`/`ENTB`/`ENTB3` actors, bind a rail, `WAIT_CAMJOB`, `WAIT_FRM`, `NEXTEV`. Rails used: groups **107–116** (plus 115 with a long 121–520 window). `SNDON 263` opens most beats. Attract/demo tick `TickAttractDemo` (`FUN_00473e04`) / `TickAttractScroll` (`FUN_00458bd8`) can restart or take coin/start; `ATCMD` from scripts is the event-side hook (14 uses, mostly in chapter scenes, not in `adv` itself).
 
 #### Stage end (slot 6) — ending variants
 
@@ -1511,13 +1875,13 @@ These do **not** add tracks or opcodes. They run next to the VM:
 
 | System | Function | Behaviour |
 |--------|----------|-----------|
-| Title / attract UI mode 1 | `FUN_004210fc` | Main menu layout; optional stage-select `FUN_00422808` |
-| Attract/demo tick | `FUN_00473e04` | Demo input, stage restart, player-count transitions |
-| Attract scroll / difficulty | `FUN_00458bd8` / `FUN_00458c28` | Called from the gameplay tick |
-| Title camera matrices | `FUN_00496f60` | Fixed rotations for 1P vs 2P title layouts |
-| Live camera = title/alt | `DAT_00da0bd0 == 2` | `FUN_00461b90` instead of gameplay `FUN_00461adc` |
-| Stage-intro countdown | `FUN_0051a8d0` | HUD sprites + SFX; not an `evtALL` op |
-| Route playback (intro/wait/active) | `FUN_004c608c` | Sprite stamps for the route UI, not the 3D rail |
+| Title / attract UI mode 1 | `TitleAttractUiMode1` (`FUN_004210fc`) | Main menu layout; optional stage-select `CountStagesForSelectUi` (`FUN_00422808`) |
+| Attract/demo tick | `TickAttractDemo` (`FUN_00473e04`) | Demo input, stage restart, player-count transitions |
+| Attract scroll / difficulty | `TickAttractScroll` (`FUN_00458bd8`) / `TickAttractDifficulty` (`FUN_00458c28`) | Called from the gameplay tick |
+| Title camera matrices | `TitleCameraMatrices` (`FUN_00496f60`) | Fixed rotations for 1P vs 2P title layouts |
+| Live camera = title/alt | `DAT_00da0bd0 == 2` | `TitleCameraView` (`FUN_00461b90`) instead of gameplay `GameplayCameraView` (`FUN_00461adc`) |
+| Stage-intro countdown | `TickStageIntroCountdown` (`FUN_0051a8d0`) | HUD sprites + SFX; not an `evtALL` op |
+| Route playback (intro/wait/active) | `DrawRoutePlaybackUi` (`FUN_004c608c`) | Sprite stamps for the route UI, not the 3D rail |
 
 ### Reconstructing a sequence (this tool)
 
@@ -1525,7 +1889,7 @@ No `-cutscene` flag. To replay one beat:
 
 1. `-e` on `evtALL.rbh` — pick `stages[StageNo].scenes[SceneNo].sections[EventNo]`. Read `CCTB` `camera.camGroup` / `startFrame` / `endFrame`, plus `ENTB*` spawns and `SNDON` ids.
 2. `-c` on `camALL.rbh` — evaluate that group’s six Hermite tracks at integer frame `t` in `[start, end)`. Camera at tracks 0–2, look-at 3–5 (Y-up).
-3. `-m` on `worldN.rbh` and `CREAT1.RBH` / `CREAT2.rbh` — instance spawns by `typeId` → [Creatures](#creatures-exe-types--creat-ids--vvtp-pages) (spawn `typeId` is the 137-slot function table, **not** the 94-row creature table).
+3. `-m` on `worldN.rbh` and `CREAT1.RBH` / `CREAT2.rbh` — instance spawns by `typeId` → [creatures.md](creatures.md) (spawn `typeId` is the 137-slot function table, **not** the 94-row creature table).
 4. `-p` on `B_RED.VMC` (or `bigger.vmc`) and `-s` on `spr.rbh` — pages + HUD / FX quads.
 5. `-w` on `O_*.rbh` / `gamesnds.rbh` — `SNDON` args are sound ids, not filenames.
 
@@ -1533,254 +1897,119 @@ Hold the pose while the script would `WAIT_CAMJOB` (until `t` reaches `end`). Ov
 
 ---
 
-## Creatures (exe types → CREAT ids → VVTP pages)
+## Cutscene audio cue sheet
 
-On-disk creature data is **pooled**, not one file per enemy. Names live in `THOTD.exe` motion strings and a 94-row type table. Mesh parts are `CREAT1.RBH` / `CREAT2.rbh` ids; skins are VVTP pages in `texture.VMC` / `B_*`.
+There is no FMV and no subtitle text. A “cutscene” is an `evtALL.rbh` event section: camera rail, actor spawns, and `SNDON`. This note is how those `SNDON` ops join to the clip `PlayDigitalSfx` (`FUN_00412000`) requests.
 
-This note is **not** a CLI flag. Pair `-m` on the CREAT files with `-p` on a `.vmc`, then join through the exe tables below. Exploratory dumps live in `scripts/creature-map/` (not wired into `index.ts`). Decomp: `FUN_00418aa0` (load), `FUN_00419cac` (CREAT id table → `DAT_00d53080`), `FUN_00483ad0` (type → model id).
+On-disk PCM: [audio.md](audio.md). Event VM / rails: [cutscenes.md](cutscenes.md), [events-detailed.md](events-detailed.md).
 
-### Files are banks
+This is **not** a CLI flag. WAV export stays `-w`. The per-scene sheet is generated, not stored in this tree:
 
-| Asset | Role |
-|--------|------|
-| `CREAT1.RBH` | Creature/NPC mesh parts. 1397 ids, 917 nodes. Ids **0–6611**, no overlap with CREAT2. |
-| `CREAT2.rbh` | Same layout. 2677 ids, 1517 nodes. Ids **55–7498**. |
-| `texture.VMC` / `B_*` / `bigger.vmc` | One shared page bank. `B_RED`…`B_PURPL` are blood-colour remaps of the same 421 pages, not different species. |
-
-`FUN_00418aa0` always loads `ART\STAGE1\CREATURE\CREAT1.RBH`, then `CREAT2.RBH`, then `texture.VMC`. There is no per-chapter creature file.
-
-Each CREAT id is one **body-part node** (median ~20 verts), not a whole character. A creature is a skeleton of many ids.
-
-`FUN_00419cac` copies each CREAT id table into a global slot array:
-
-```
-for (id, nodePtr) in table until id == -1:
-    DAT_00d53080[id] = nodePtr
+```text
+uv run python scripts/cutscene_cues.py
 ```
 
-CREAT2 is loaded second; ids do not collide, so both banks sit in one namespace. Draw looks up `DAT_00d53080[modelId]`. Spawn helpers also hardcode model ids (`0xb69`, `0x12c0`, `0xbb0`, …); those values are CREAT ids, not world ids.
+That writes `decompressed_assets/exe_tables/cutscene-cues.json` (gitignored) from `evtALL.rbh` and `DAT_005cbda8`. Retail checks: 270 sound-request rows, 272 `SNDON` ops.
 
-### Exe tables (`THOTD.exe`)
+### `SNDON` → `PlayDigitalSfx` (`FUN_00412000`)
 
-PE: image base `0x400000`. DGROUP starts at VA `0x5A0000` (file offset `0x187400`). File offset = `0x187400 + (VA − 0x5A0000)`.
-
-| VA | Layout | Role |
-|----|--------|------|
-| `DAT_005d46ac` | 94 × `0x4C` | Per-type stats (model, HP, scale, default motion) |
-| `DAT_005efa58` | 94 × `s32` | Bone count |
-| `DAT_005ef8e0` | 94 × pointer | Skeleton root (bone tree) |
-| `DAT_005f1258` | 674 × pointer | `MO_*` motion name strings |
-
-Ghidra often reads the 16-bit type at `entity+0xd4` as `*(int*)(entity+0xd2) >> 16`. Motion id is the 16-bit at `+0xd8` (`>> 16` of `+0xd6`).
-
-#### Type row (`0x4C`)
+`SNDON` (`0x5a`) takes one `u32`. That value is an index into `DAT_005cbda8`, **not** an `O_*` `soundId` and **not** a `gamesnds` row.
 
 ```
-offset  size  field
-0x00    4     u32 modelId     root / display id (may be absent from CREAT; bones have the real ids)
-0x14    4     f32 hitRadius   copied to entity+0x98; gun sphere in FUN_00414aac (not combat HP)
-0x28    4     f32 scale
-0x2C    4     f32 yOffset
-0x30    4     f32 (extra)
-0x44    4     u32 defaultMotion   index into DAT_005f1258
+DAT_005cbda8  270 × 0x0C
+  +0x00  u32 kind     0 nop, 1 mixer, 2 mixerDrain, 3 mixer3 (CD via PlayCdAudioTrack), 4 oneshot, 5 stop
+  +0x04  u32 namePtr  C string stem for kind 4 (sprintf "sound\\O_%s.rbh")
+  +0x08  s32 extra    gamesnds index (kinds 1–2), CD gate (kind 3), mixer id (kind 4), or −1
 ```
 
-`FUN_00483ad0` copies `+0x00` → `entity+0x5c` (model id), `+0x14` → `+0x98` (hit-sphere radius), `+0x28` → `+0x9c` (scale). Combat HP is the ENTB u16 at record `+0x22` → `entity+0x78` — [Enemy systems](#enemy-spawn-ai-scoring-and-collision-thotdexe).
+PE: image base `0x400000`, DGROUP VA `0x5A0000` (file `0x187400`). File offset = `0x187400 + (VA − 0x5A0000)`.
 
-`defaultMotion` is often a **shared idle** (`MO_b3_pose_2`, `MO_b1_atk_a`), not the species walk set. Species clips (`MO_ebitb_*`, `MO_k_*`, …) are selected at runtime by AI, so type index → Ebitan/Kageo is **not** a single column.
+| Kind | Name | What plays |
+|------|------|------------|
+| 0 | `nop` | Nothing (`extra` is usually `−1`) |
+| 1 | `mixer` | `gamesnds.rbh` row `extra` (embedded PCM, or external `O_*` via `soundId`) |
+| 2 | `mixerDrain` | Drain loop: `DispatchSoundCallback` (`FUN_005656d0`) until `−1` |
+| 3 | `mixer3` | CD audio: `PlayDigitalSfx` (`FUN_00412000`) at `0x4120AA–0x4120EB` calls `PlayCdAudioTrack` (`FUN_00565d60`) when `DAT_00d5b214` is set and `extra != −1`. `extra` is not a `gamesnds` clip |
+| 4 | `oneshot` | `sound\O_%s.rbh` from `namePtr`. `extra` is a mixer id, **not** the file `soundId` |
+| 5 | `stop` | Stop / gate (`DispatchSoundCommand` (`FUN_00411f9c`)) |
 
-#### Skeleton node (`DAT_005ef8e0[type]`)
+Kind 4 `extra` is **not** the oneshoot header `soundId`. `O_HELP.rbh` is table id **123** (file `soundId` 28). `O_voc09.rbh` is table id **165**, the only `O_voc*` `SNDON` in `evtALL` (Stage 04 Scene 00). The other voc clips are fired from entity / player-voice code, not this opcode stream.
 
-```
-offset  size  field
-0x00    4     u32 meshId      CREAT id; 0 = dummy root
-0x04    12    f32 xyz         local bone offset
-0x14    4     bone index
-0x18    4     u32 childCount  (0..8)
-0x1C    4×N   child pointers
-```
+Stage **tt** (title) has no `SNDON`. Scene-open `SNDON 9` / `10` / `16` / `22` are per-chapter CD stingers (kind 3).
 
-Walk only `+0x00` as the mesh id and `+0x1C` for `childCount` children. Treating every word as an id pulls in unrelated meshes (including id 0 → page 589).
-
-Union of those mesh ids, then OBJ `usemtl page_N`, is the type’s skin set.
-
-### Motion names (species roster)
-
-674 strings at `DAT_005f1258`. Prefix is the developer name; Sega English names in the right column are inferred.
-
-| Prefix | Clips | Index range (main run) | Likely character |
-|--------|------:|------------------------|------------------|
-| `z` | 196 | 467–650 | generic zombie |
-| `k` | 80 | 211–288 | **Kageo** |
-| `p` | 53 | 339–384 | player |
-| `saru` | 49 | 403–451 | **Saruzou** |
-| `ebitb` | 39 | 138–176 | **Ebitan** |
-| `boss4` | 32 | 66–97 | **Magician** (stage 4) |
-| `b3` | 28 | 38–65 | **Hermit** (`tojo_ana` = emerge from a hole) |
-| `b1` | 23 | 0–21 | **Chariot** (`yoroi` = armor) |
-| `dog` / `inu` | 23 | 100–210 | **Kenfis** |
-| `dr` | 20 | 118–137 | **Drake** (knife/throw) |
-| `s` | 18 | 385–402 | scientist / civilian (`help`) |
-| `b2` | 16 | 22–37 | **Hangedman** (`fly` / `glider` / `bat`) |
-| `mol` | 13 | 300–312 | **Murrer** (hole-emerge) |
-| `gman` | 12 | 188–199 | **Goldman** |
-| `kyu` / `kyuri` | 12 | 289–299 | **Cyril** |
-| `frog` | 11 | 177–187 | **Bouere** |
-| `tom` | 8 | 459–466 | **Thomas Rogan** |
-| `hiru` | 6 | 200–205 | **Name** (leech / slug) |
-| `mrg` | 4 | 332–335 | **G** |
-| `onozonbia` | 3 | 336–338 | Cyril axe walk |
-| `taraba` | 3 | 453–455 | **Taran** (crab) |
-| `tekk` | 3 | 456–458 | **Robert** (iron arm) |
-
-`O_*.rbh` names (`O_ST4BO1`, `O_ENEMY1`, `O_INU`, `O_FROG2`) are mixer labels (`sound\O_%s.rbh`), not CREAT or page keys.
-
-### VVTP page bands
-
-The creature `.vmc` is a **whole-game atlas**. Page ids (header `pageId`, same numbers as `-p` PNG names):
-
-| Pages | Used by |
-|------:|---------|
-| 1–337 | `spr.rbh` frames |
-| 338–511 | unused gap (174 missing ids in `B_RED`) |
-| 512–546 | `world*.rbh` |
-| **547–595** | **CREAT mesh skins** |
-
-Page 18 is a sprite page, not a creature skin.
-
-### Official roster → engine types
-
-Sega names and A–G codes from the Saturn manual / Curien report. Engine types from `DAT_005d46ac` + CREAT skeleton pages + slot-128 `spawnEventId` (that field *is* the type for `FUN_0047b2c4`). Default motions are often a shared idle (`MO_b3_pose_2`); species clips live in the 674-name `MO_*` list.
-
-| Sega | Name | Chapters | Type(s) | Conf. | Evidence |
-|------|------|----------|---------|-------|----------|
-| A-1 | **Sam** | 1–4 | **16**, 91 | high | Exe logs `ENGuard_BO_zonbiman` when type `== 0x10`; grey muscular page 556 |
-| A-2 | Neil | 1–3 | 11? | medium | Stronger Sam; type 11 is scale 1.2 on the green-flesh + civilian mix |
-| A-3 | **Cyril** | 1–3 | **18** | high | Grey suit + chest wound, radius 9, `MO_kyu_*` / `MO_onozonbia_*` |
-| B-1 / B-2 | Kageo / Bourbon | 1, 3 | 3, 4 | medium | Green rotting page 550; `MO_k_*` is the largest non-generic clip set |
-| B-3 / B-4 | Ebitan a / b | 1–3 | 87 | medium | Green cracked 575/583; `MO_ebitb_*` and `MO_d_sakaoli` (hang) |
-| C-1 / C-2 | Samson / Bentley | 1–4 | 71, 73 | medium | Stony muscular + belt on page 578 |
-| C-3 | Burner | 3 | 74? | low | Blowtorch Samson; red muscular page 580 |
-| D-1 | Simon | 1–2 | 82 | medium | Grey muscular grinning; shoulder-tackle type |
-| D-2 | Gilmore | 2, 4 | — | — | Sledgehammer; not pinned |
-| D-3 | Harris | 3–4 | — | — | Ball and chain; not pinned |
-| D-4 | Robert | 3–4 | — | — | Metal arm; `MO_tekk_*` |
-| E-1 | Rubin | 2 | — | — | Rolls / claws; not pinned |
-| E-2 | **Drake** | 2 | **83**, 84 | high | Default motion `MO_dr_l_nage`; grinning one-eyed page 574 |
-| E-3 | Moody | 3–4 | — | — | Iron claw / wall; `MO_mood*` / `MO_monkabe*` |
-| E-4 | Parlor | 3–4 | 84? | low | Drake-like; `MO_dr_knif_chaku` |
-| F-1 | Kenfis | 1 | 75? | low | Hellhound; `MO_ddogg*` / `MO_inu*` |
-| F-2 | **Saruzou** | 1 | **1** | high | Primate pages 582/585, scale 0.5; 68 Stage 01 slot-128 spawns |
-| F-3 | Bouere | 1 | — | — | Water frog; `MO_frog_*` (not `MO_dr_*`) |
-| F-4 | **Devilon** | 1, 2, 4 | **76** | high | Blue hexagonal demon, pages 557–558 |
-| G-1 | Murrer | 1–2 | 60 / 75? | low | Hole-emerge; `MO_mol_hole_*` |
-| G-2 | Name | 1 | 60 / 75? | low | Wall slug; `MO_hiru_*` |
-| G-3 | Taran | 3 | — | — | Crawler; `MO_taraba_*` |
-| other | kage / pdolob / neopetit / taalu | 1–3 | 86? | low | Unnamed in 1996 print; `MO_zonbi1/2/3` are background walkers |
-| Type 27 | **Chariot** | 1, 4 | **35**, **36** | high | Armor pages 547–549; slot 37 writes type 35 (HP 480) |
-| Type 041 | **Hangedman** | 1–2 | **6**, 7, 8, 38 | high | Bat-wing page 554; slots 35/36 hardcode type 6 |
-| Type 6803 | **Hermit** | 3 | **64** | high | 28 bones; six-hole mask pages 561/562/591; `MO_b3_tojo_ana` |
-| Type 0 | **Magician** | 4 | **51** | high | `MO_boss4_*`; grey bald page 569; radius 12 |
-| NPC | **Goldman** | story | **2** | high | Brown coat, glasses, DBR badge; scale 1.4 |
-| NPC | Scientists / civilians | 1–4 | 17, 19–28, 49, 65, 89 | high | Lab-coat page 551 cluster; civilian 552+568 |
-| NPC | Rogan / G / Sophie / Curien | story | — | — | `MO_p_*`, `MO_tom_*`, `MO_mrg_*`, `MO_synd_demo` |
-
-### Type → page (all 94)
-
-Skeleton walk → unique pages, then checked against `B_RED` PNGs. Hit radius / scale from `DAT_005d46ac`. Bone count from `DAT_005efa58`. Radius is the gun hit-sphere, not combat HP.
-
-High-confidence rows:
-
-| Type | Pages | Bones | Radius | Scale | Identification |
-|-----:|-------|------:|---:|------:|----------------|
-| 1 | 582, 585 | 16 | 8 | 0.5 | **Saruzou** |
-| 2 | 560, 565, 571 | 20 | 5 | 1.4 | **Goldman** |
-| 6 | 554 | 10 | 7 | 1.0 | **Hangedman** (slots 35/36 write this) |
-| 16 | 556 | 18 | 2 | 1.5 | **Sam** (`zonbiman`) |
-| 17, 19–21, 24, 49 | 551 | 18–20 | ~5–8 | 1.0 | DBR lab-coat scientists |
-| 18 | 563 | 16 | 9 | 1.0 | **Cyril** |
-| 35 / 36 | 547–549 | 18 | 1.8 / 8 | 0.5 / 1.0 | **Chariot** |
-| 51 | 569 | 18 | 12 | 1.0 | **Magician** |
-| 64 | 561, 562, 591 | **28** | 2.6 | 1.0 | **Hermit** |
-| 76 | 557, 558 | 16 | 2.8 | 1.2 | **Devilon** |
-| 83 | 574 | 18 | 2.5 | 1.0 | **Drake** (`MO_dr_l_nage`) |
-
-Medium / notable variants: 3–4 Kageo family (page 550); 7 Hangedman body (554+576); 8 Hangedman-sized Stage 02 (radius 12.5); 11 Neil/swamp mix; 23/25–27 civilians (552+568); 38 flying/Hangedman (558+569); 71/73 C-type (578); 82 Simon (573); 84 Drake/Parlor (`MO_dr_knif_chaku`); 87 Ebitan (575+583); 91 Sam variant (556+576).
-
-Type 0 is an all-zero template (bones still 21). Types 5, 10, 39, 44, 52, 66, 75 have **no** VVTP pages on the skeleton walk — 75 (9 bones, scale 0.5) and 60 (scale 0.25) are the best animal/insect candidates.
-
-There are 94 types. Many are clothing/damage/LOD variants that share a page set. Gilmore, Harris, Robert, Rubin, Moody, Kenfis, Bouere, Murrer, Name, Taran, and the player/Sophie/Curien meshes still have motion sets but no unique type-row default.
-
-### How to reproduce
-
-1. `-m` on `CREAT1.RBH` and `CREAT2.rbh` → `ids.json` + `node_*.obj`.
-2. `-p` on `B_RED.VMC` (or `bigger.vmc`) → `page_XXXX.png`.
-3. `-e` on `evtALL.rbh` → `events.json` (spawn `typeId` / `spawnEventId`).
-4. `bun run scripts/creature-map/hotd-creature-map.ts` — dump the 94 type rows, spawn-fn table (`DAT_005d8118`), and event usage from `THOTD.exe`.
-5. `bun run scripts/creature-map/hotd-creature-clusters.ts` — cluster types by VVTP pages; histogram `spawnEventId`.
-6. `bun run scripts/creature-map/hotd-more.ts` — extra type rows 94–127 and slot-128 prolog.
-7. `bun run scripts/creature-map/hotd-hp.ts` — high-HP spawns and Stage 03/04 slot usage.
-
-To join a type to a skin by hand: walk `DAT_005ef8e0[type]`, collect `meshId`s, look up OBJ `usemtl page_N`.
-
-JSON from those scripts lands under `decompressed_assets/exe_tables/` (`creature-map.json`, `creature-clusters.json`) alongside the older `types.json` / `motions.json` / `mapping.json`. All gitignored, not a CLI output.
+`scripts/cutscene_cues.py` records each `SNDON` as `{stage, scene, section, sndonId, kind, kindName, extra, sample}`. `sample` is `O_NAME.rbh`, `gamesnds[index]`, or `cdaudio[extra]`.
 
 ---
 
 ## Game rendering (`THOTD.exe`)
 
-How the PC / Tantalus engine turns decompressed assets into a frame. On-disk layouts stay in the per-type sections; this note is the **runtime** path: backends, view, mesh submit, textures, sprites, and the software / Direct3D rasterizers.
+How the PC / Tantalus engine turns decompressed assets into a frame. On-disk layouts stay in the per-type notes; this note is the **runtime** path: backends, view, mesh submit, textures, sprites, and the software / Direct3D rasterizers.
 
-This note is **not** a CLI flag. Pair `-m` / `-p` / `-s` / `-c` / `-e` with the exe tables below. Decomp: `hotd-decomp/THOTD-exe-commented.c`. WinMain is `LAB_00563440` (recovered from `THOTD.exe` @ `0x563440`).
+This note is **not** a CLI flag. Pair `-m` / `-p` / `-s` / `-c` / `-e` with the exe tables below. Decomp: `hotd-decomp/THOTD-exe-commented.c`. WinMain is `WinMainEntry` (`LAB_00563440`) (recovered from `THOTD.exe` @ `0x563440`).
 
 ### Two backends
 
-WinMain (`LAB_00563440`) picks a renderer from the command line, then seeds `PTR_DAT_00c649e0` (the graphics vtable every draw call goes through):
+WinMain (`WinMainEntry` (`LAB_00563440`)) picks a renderer from the command line, then seeds `PTR_DAT_00c649e0` (the graphics vtable every draw call goes through):
 
 | Cmdline | Init | Vtable | Path |
 |---------|------|--------|------|
-| `ddraw` or `d3d` | `FUN_00573ca0` | `DAT_00c66ef8` | DirectDraw + Direct3D 6 (`IDirect3DDevice3`) |
-| *(else)* | `FUN_00565e70` | `DAT_00c652a4` | Software: lock the back-buffer and scanline-fill |
+| `ddraw` or `d3d` | `InitDirect3DBackend` (`FUN_00573ca0`) | `DAT_00c66ef8` | DirectDraw + Direct3D 6 (`IDirect3DDevice3`) |
+| *(else)* | `InitSoftwareBackend` (`FUN_00565e70`) | `DAT_00c652a4` | Software: lock the back-buffer and scanline-fill |
 
-`FUN_00573ca0` enumerates adapters (`DirectDrawEnumerateA`), `DirectDrawCreate` → `DAT_00c64cac` (`IDirectDraw*`), queries a second interface into `DAT_00c66ecc`, and later binds `DAT_00c66ee8` as the D3D device. `FUN_00565e70` only swaps the vtable pointer.
+`InitDirect3DBackend` (`FUN_00573ca0`) enumerates adapters (`DirectDrawEnumerateA`), `DirectDrawCreate` → `DAT_00c64cac` (`IDirectDraw*`), queries a second interface into `DAT_00c66ecc`, and later binds `DAT_00c66ee8` as the D3D device. `InitSoftwareBackend` (`FUN_00565e70`) only swaps the vtable pointer.
 
 Game code never calls DirectDraw / D3D directly for meshes. It calls vtable slots; the two backends implement the same offsets.
 
 | Vtable offset | Role |
 |---------------|------|
-| `+0x04` | Renderer init (`FUN_005627c0`) |
+| `+0x04` | Renderer init (`InitRendererPrimPool` (`FUN_005627c0`)) |
 | `+0x08` | Teardown |
 | `+0x10` | Pause/resume around MessageBox |
-| `+0x24` | Per-camera draw (`FUN_005626d0` → this) |
+| `+0x24` | Per-camera draw (`DrawCameraObject` (`FUN_005626d0`) → this) |
 | `+0x34` | Palette / mode hook (stage load) |
 | `+0x60` / `+0x64` | Allocate / free a VRAM texture slot |
-| `+0x68` | Present / flip (`FUN_00418434`) |
+| `+0x68` | Present / flip (`PresentFlip` (`FUN_00418434`)) |
 | `+0x78` | Draw triangle (plain) |
 | `+0x7c` | Draw quad (plain) |
 | `+0x80` | Draw textured triangle |
 | `+0x84` | Draw textured quad |
 | `+0xbc` | 2D blit (UI glyphs) |
 
+#### Software vtable (`DAT_00c652a4`, recovered)
+
+Ghidra’s named export jumps from `FUN_0057c9b7` (`atoi`) to `FUN_00582ed0` (`D3dDrawIndexedPrimitive`). That **`0x57c9b7`–`0x582ed0` hole** is the software camera draw and the tri/quad setup that packs projected verts into the 0x224-byte prim record and calls clip + scanline. Dump from `THOTD.exe` (image base `0x400000`, RVA of the vtable **`0x8652a4`**):
+
+| Slot | Software impl | Role |
+|------|---------------|------|
+| `+0x24` | `FUN_0057cce0` | Per-camera draw: lock buffer, walk depth buckets, clip, call scanlines |
+| `+0x74` | `FUN_0057f3c0` | Alloc a 0x224 prim record; insert by truncated average depth |
+| `+0x78` | `FUN_0057f230` | Plain tri setup |
+| `+0x7c` | `FUN_0057f070` | Plain quad setup |
+| `+0x80` | `FUN_0057eeb0` | Textured tri setup |
+| `+0x84` | `FUN_0057ecb0` | Textured quad setup |
+
+Type codes written at prim record `+0x08`: `0x52` / `0x62` flat, `0x92` / `0xa2` textured opaque, `0xc92` / `0xca2` textured transparent. Batch `flags & 0x100` selects the transparent filler; `flags & 0x200` skips `PrimFacingTest` (`FUN_00578f60`).
+
 D3D device vtable (on `DAT_00c66ee8`) is the real COM object: `+0x24` `BeginScene`, `+0x28` `EndScene`, `+0x5c` `SetRenderState`, `+0x78` `DrawIndexedPrimitive`.
 
 ### Frame loop
 
-Idle pump `FUN_00562e30` (called while `DAT_00c64b14` bit 0 is set):
+Idle pump `IdleFramePump` (`FUN_00562e30`) (called while `DAT_00c64b14` bit 0 is set):
 
 1. `PeekMessageA` — if a message is waiting, `GetMessageA` / `TranslateMessage` / `DispatchMessageA`.
 2. Else, when the window is active (`DAT_00c64b2c`, `DAT_00c64b14` bit 1) and not paused (bit 10 clear):
-   - `FUN_00568290` — scene-graph sync: run pending `+0x18` callbacks, copy last-frame matrices.
-   - `FUN_00568350` — for each camera object with draw-enable, `FUN_005626d0` → vtable `+0x24`.
-   - `FUN_00579fa0` flushes callback queues around those two.
-   - Busy-wait `FUN_00578940` until `DAT_00da69b4` (next-frame deadline). Deadline is `now + 1000 / fps`.
+   - `SyncSceneGraph` (`FUN_00568290`) — scene-graph sync: run pending `+0x18` callbacks, copy last-frame matrices.
+   - `DrawEnabledCameras` (`FUN_00568350`) — for each camera object with draw-enable, `DrawCameraObject` (`FUN_005626d0`) → vtable `+0x24`.
+   - `FlushDrawCallbacks` (`FUN_00579fa0`) flushes callback queues around those two.
+   - Busy-wait `WaitForFrameDeadline` (`FUN_00578940`) until `DAT_00da69b4` (next-frame deadline). Deadline is `now + 1000 / fps`.
 
 `DAT_005cd35c != 0` skips 3D submit (load / fade). Present is vtable `+0x68`.
 
-Gameplay tick `FUN_00458b7c` (from `FUN_00458720`) updates entities and camera **before** the pump draws. Camera rails: [Cameras](#cameras-camallrbh). Event scripts that queue those rails: [Events in detail](#events-in-detail-vm-opcodes-spawns-cameras). Scripted playback (title / attract / ending, no FMV): [Cutscenes](#cutscenes-thotdexe).
+Gameplay tick `TickGameplay` (`FUN_00458b7c`) (from `TickGameplayParent` (`FUN_00458720`)) updates entities and camera **before** the pump draws. Camera rails: [cameras.md](cameras.md). Event scripts that queue those rails: [events-detailed.md](events-detailed.md). Scripted playback (title / attract / ending, no FMV): [cutscenes.md](cutscenes.md).
 
 ### Display surface
 
-`FUN_005663d0` sets the DirectDraw mode. Logical size is `DAT_00c64a00` × `DAT_00c64a04`; bpp is `DAT_00c64a14` / `DAT_00c64a08`.
+`SetDirectDrawMode` (`FUN_005663d0`) sets the DirectDraw mode. Logical size is `DAT_00c64a00` × `DAT_00c64a04`; bpp is `DAT_00c64a14` / `DAT_00c64a08`.
 
 | bpp | Flag in `DAT_00c649f4` | Pixels |
 |-----|------------------------|--------|
@@ -1789,52 +2018,52 @@ Gameplay tick `FUN_00458b7c` (from `FUN_00458720`) updates entities and camera *
 
 Software path:
 
-- Lock: `FUN_005661f0` — `IDirectDrawSurface::Lock` on `DAT_00da8980`. Pixel base `DAT_00c65380`, pitch `DAT_00c64cdc`, flag bit 7 (`0x80`).
-- Unlock: `FUN_005661a0`.
-- Windowed vs fullscreen: `DAT_00c649f8 == 0` is windowed (`FUN_00574dc0` adjusts for menu chrome).
+- Lock: `LockBackBuffer` (`FUN_005661f0`) — `IDirectDrawSurface::Lock` on `DAT_00da8980`. Pixel base `DAT_00c65380`, pitch `DAT_00c64cdc`, flag bit 7 (`0x80`).
+- Unlock: `UnlockBackBuffer` (`FUN_005661a0`).
+- Windowed vs fullscreen: `DAT_00c649f8 == 0` is windowed (`AdjustWindowedChrome` (`FUN_00574dc0`) adjusts for menu chrome).
 
-Primitive pool: `FUN_005627c0` `GlobalAlloc`s `N * 0x224` bytes into `DAT_00c64a38`. Sorted draw lists live at `DAT_00c65390` (opaque) and `DAT_00c65394` (transparent); `FUN_0057a800` walks both.
+Primitive pool: `InitRendererPrimPool` (`FUN_005627c0`) `GlobalAlloc`s `N * 0x224` bytes into `DAT_00c64a38`. Sorted draw lists live at `DAT_00c65390` (opaque) and `DAT_00c65394` (transparent); `WalkSortedDrawLists` (`FUN_0057a800`) walks both.
 
 ### Viewport
 
-Clip rectangle in `DAT_00d53020` (x0), `DAT_00d53024` (y0), `DAT_00d53028` (x1), `DAT_00d5302c` (y1). Applied with `FUN_00568550` (viewport) and `FUN_00568770` (windowed scissor). `FUN_00568a00` recomputes origin/extent.
+Clip rectangle in `DAT_00d53020` (x0), `DAT_00d53024` (y0), `DAT_00d53028` (x1), `DAT_00d5302c` (y1). Applied with `SetViewportClip` (`FUN_00568550`) (viewport) and `SetWindowedScissor` (`FUN_00568770`) (windowed scissor). `RecomputeViewportExtent` (`FUN_00568a00`) recomputes origin/extent.
 
 | Helper | Layout |
 |--------|--------|
-| `FUN_0048780c` | Full screen (`0,0`–`W,H`) |
-| `FUN_0048769c` | Letterbox bands from screen height / `0x180` |
-| `FUN_00487708` | 2P split: top band `(H * 0x28) / 0x180`, then two `FUN_00568770` surfaces |
+| `SetFullscreenViewport` (`FUN_0048780c`) | Full screen (`0,0`–`W,H`) |
+| `SetLetterboxViewport` (`FUN_0048769c`) | Letterbox bands from screen height / `0x180` |
+| `SetSplitScreenViewport` (`FUN_00487708`) | 2P split: top band `(H * 0x28) / 0x180`, then two `SetWindowedScissor` (`FUN_00568770`) surfaces |
 
 Projection scale for a camera object sits at `+0x20` (X) and `+0x24` (Y). Near clip is view-space `z < 1.0` (`0x3f800001`).
 
 ### View and transform stack
 
-Stage space is the same as world meshes and camera rails: **Y up**, X/Z along the corridor. Do not bake world-node `+0x20` XYZ as a translate ([Meshes](#meshes-worldrbh-creatrbh)).
+Stage space is the same as world meshes and camera rails: **Y up**, X/Z along the corridor. Do not bake world-node `+0x20` XYZ as a translate ([meshes.md](meshes.md)).
 
 #### Camera → view
 
-`FUN_004caa70` samples `camALL.rbh` (eye XYZ + look-at XYZ), then:
+`TickCameraRail` (`FUN_004caa70`) samples `camALL.rbh` (eye XYZ + look-at XYZ), then:
 
-1. `FUN_00461a30` — direction = eye − look-at → fixed-point yaw/pitch (×16). Negate yaw, add `0x8000` to pitch, roll = 0.
-2. `FUN_0048a15c` — raycast `(eye.x, 32768, eye.z)` onto the stage mesh; player XZ follows the camera, Y from the ground hit.
+1. `EyeLookAtToYawPitch` (`FUN_00461a30`) — direction = eye − look-at → fixed-point yaw/pitch (×16). Negate yaw, add `0x8000` to pitch, roll = 0.
+2. `RaycastStageFloor` (`FUN_0048a15c`) — raycast `(eye.x, 32768, eye.z)` onto the stage mesh; player XZ follows the camera, Y from the ground hit.
 
-`FUN_0045f140` rebuilds **six** view slots (stride `0x154` at `DAT_00da01c0`). `DAT_00da0bd0` selects the live camera: `0` = gameplay (`FUN_00461adc`), `2` = title/alt (`FUN_00461b90`). Zoom, 2P aim blend, and shake sit on top of the rail and do not add tracks — [Cameras](#cameras-camallrbh).
+`BuildViewSlotMatrices` (`FUN_0045f140`) rebuilds **six** view slots (stride `0x154` at `DAT_00da01c0`). `DAT_00da0bd0` selects the live camera: `0` = gameplay (`GameplayCameraView` (`FUN_00461adc`)), `2` = title/alt (`TitleCameraView` (`FUN_00461b90`)). Zoom, 2P aim blend, and shake sit on top of the rail and do not add tracks — [cameras.md](cameras.md).
 
 #### Matrix stack
 
-`DAT_012e27f0` is the current 3×4 matrix (12 floats, 0x30 bytes). Base of the stack is `DAT_00c6641c` (`FUN_00569510`). Identity lives at `DAT_005ce4f4`.
+`DAT_012e27f0` is the current 3×4 matrix (12 floats, 0x30 bytes). Base of the stack is `DAT_00c6641c` (`InitMatrixStack` (`FUN_00569510`)). Identity lives at `DAT_005ce4f4`.
 
 | Function | Role |
 |----------|------|
-| `FUN_00569600` | Push (copy 12 floats, advance the pointer) |
-| `FUN_004b2938` | Load identity |
-| `FUN_00474ecc` / `FUN_0042f704` / `FUN_004b4fd4` | Translate |
-| `FUN_004751f4` / `FUN_004750ec` / `FUN_00475380` | Rotate Y / X / Z (sin/cos table `DAT_005697b0`, 16-bit angle) |
-| `FUN_004b9f5c` | Translate + Y/X/Z + uniform scale (`entity+0x9c`), then submit |
+| `MatrixPush` (`FUN_00569600`) | Push (copy 12 floats, advance the pointer) |
+| `MatrixLoadIdentity` (`FUN_004b2938`) | Load identity |
+| `MatrixTranslate` (`FUN_00474ecc`) / `MatrixTranslateEntity` (`FUN_0042f704`) / `MatrixTranslateAlt` (`FUN_004b4fd4`) | Translate |
+| `MatrixRotateZ` (`FUN_004751f4`) / `MatrixRotateY` (`FUN_004750ec`) / `MatrixRotateX` (`FUN_00475380`) | Rotate Y / X / Z (sin/cos table `DAT_005697b0`, 16-bit angle) |
+| `SubmitEntityTransform` (`FUN_004b9f5c`) | Translate + Y/X/Z + uniform scale (`entity+0x9c`), then submit |
 
-Pop is `DAT_012e27f0 -= 0xC` (12 floats). `FUN_00492170` / `FUN_00465d04` transform a point by the current matrix.
+Pop is `DAT_012e27f0 -= 0xC` (12 floats). `TransformPoint` (`FUN_00492170`) / `TransformPointAlt` (`FUN_00465d04`) transform a point by the current matrix.
 
-`FUN_00579200` / `FUN_005792b0` batch-transform `float3` verts through that 3×4, perspective-divide, and (in `FUN_005792b0`) write clip outcodes. Output stride is **7 floats (0x1c bytes)**:
+`ProjectVertices` (`FUN_00579200`) / `ProjectVerticesWithClip` (`FUN_005792b0`) batch-transform `float3` verts through that 3×4, perspective-divide, and (in `ProjectVerticesWithClip` (`FUN_005792b0`)) write clip outcodes. Output stride is **7 floats (0x1c bytes)**:
 
 ```
 +0x00  f32 x     view / then screen (× viewport scale × 1/z)
@@ -1848,38 +2077,38 @@ A prim is rejected when the **AND** of the three/four clip words is non-zero (al
 
 ### Mesh submit
 
-Stage load `FUN_00418aa0` fills one 7500-slot pointer table (`DAT_00d53080`, 30000 bytes):
+Stage load `LoadStageAssets` (`FUN_00418aa0`) fills one 7500-slot pointer table (`DAT_00d53080`, 30000 bytes):
 
 1. Clear the table.
-2. `ART\STAGE1\CREATURE\CREAT1.RBH` then `CREAT2.RBH` via `FUN_00419cac` — `DAT_00d53080[id] = nodePtr` until `id == -1`.
-3. `ART\STAGE%d\WORLD\WORLD_%d.RBH` via `FUN_00419cf4` — `DAT_00d53080[id] = id-table row` until `id == 0`. The row is `{s16 id, s16 flag, u32 nodePtr…, 0}`.
+2. `ART\STAGE1\CREATURE\CREAT1.RBH` then `CREAT2.RBH` via `LoadCreatMeshBank` (`FUN_00419cac`) — `DAT_00d53080[id] = nodePtr` until `id == -1`.
+3. `ART\STAGE%d\WORLD\WORLD_%d.RBH` via `LoadWorldMeshBank` (`FUN_00419cf4`) — `DAT_00d53080[id] = id-table row` until `id == 0`. The row is `{s16 id, s16 flag, u32 nodePtr…, 0}`.
 4. `cam\allstage\camall.rbh`, `evt\allstage\evtall.rbh`.
-5. Texture bank is `ART\STAGE1\CREATURE\texture.VMC` (`FUN_00576610`), not this function.
+5. Texture bank is `ART\STAGE1\CREATURE\texture.VMC` (`LoadPiffVvtp` (`FUN_00576610`)), not this function.
 
-CREAT and world **share the table**. Draw helpers interpret a slot as a node pointer (creatures) or an id-table row (world). Creature type → model id: [Creatures](#creatures-exe-types--creat-ids--vvtp-pages).
+CREAT and world **share the table**. Draw helpers interpret a slot as a node pointer (creatures) or an id-table row (world). Creature type → model id: [creatures.md](creatures.md).
 
 #### Instance batch
 
-3D submit is a **deferred instance list**, not an immediate `DrawPrimitive`. `FUN_0043d900` begins a frame (clear queues). Each instance is 0x40 bytes: mesh id, flags, then the current 12-float matrix.
+3D submit is a **deferred instance list**, not an immediate `DrawPrimitive`. `BeginInstanceFrame` (`FUN_0043d900`) begins a frame (clear queues). Each instance is 0x40 bytes: mesh id, flags, then the current 12-float matrix.
 
 | Queue | Enqueue | Buffer | Counter |
 |-------|---------|--------|---------|
-| Opaque | `FUN_0043d948` (`FUN_0043d7f8` when `DAT_00d53080[id]` is live) | `DAT_00d64cc0` | `DAT_00d6c9d8` |
-| Translucent | `FUN_0043d990` (`FUN_0043d834`) | `DAT_00d5cfc0` | `DAT_00d6c9cc` |
+| Opaque | `EnqueueOpaqueInstance` (`FUN_0043d948`) (`EnqueueOpaqueIfLive` (`FUN_0043d7f8`) when `DAT_00d53080[id]` is live) | `DAT_00d64cc0` | `DAT_00d6c9d8` |
+| Translucent | `EnqueueTranslucentInstance` (`FUN_0043d990`) (`EnqueueTranslucentIfLive` (`FUN_0043d834`)) | `DAT_00d5cfc0` | `DAT_00d6c9cc` |
 
-`FUN_0043d928` swaps front/back counters for the draw pass.
+`SwapInstanceQueues` (`FUN_0043d928`) swaps front/back counters for the draw pass.
 
 Typical callers:
 
-- Creature / prop: build world matrix (`FUN_004b9f5c`, `FUN_00431330`, `FUN_00478a74` skeleton walk) then `FUN_0043d7f8` with `entity+0x5c` (CREAT id).
-- World: `FUN_004920cc` looks up the id-table row and enqueues **each** `nodePtr` until 0.
-- Shadow pass (when `DAT_005cd36c != 0`): `FUN_0042ce70` + `FUN_00430318` + a second `FUN_0043d7f8`. Lighting / shadow matrix helpers are `FUN_004c6954`…`FUN_004c86d0` (ground raycast at Y = `0x47000000` = 32768, same as the player plant).
+- Creature / prop: build world matrix (`SubmitEntityTransform` (`FUN_004b9f5c`), `BuildCreatureWorldMatrix` (`FUN_00431330`), `WalkSkeleton` (`FUN_00478a74`) skeleton walk) then `EnqueueOpaqueIfLive` (`FUN_0043d7f8`) with `entity+0x5c` (CREAT id). Bone clip apply: [motion.md](motion.md).
+- World: `EnqueueWorldMeshNodes` (`FUN_004920cc`) looks up the id-table row and enqueues **each** `nodePtr` until 0.
+- Shadow pass (when `DAT_005cd36c != 0`): `ShadowPassSetup` (`FUN_0042ce70`) + `ShadowPassSubmit` (`FUN_00430318`) + a second `EnqueueOpaqueIfLive` (`FUN_0043d7f8`). Lighting / shadow matrix helpers are `RotateShadowLightMatrixZ` (`FUN_004c6954`)…`RebuildShadowLightMatrix` (`FUN_004c86d0`) (ground raycast at Y = `0x47000000` = 32768, same as the player plant).
 
-`FUN_004789c8` is a mirror pass: push view, translate with **negated Z**, walk children.
+`MirrorPassWalkChildren` (`FUN_004789c8`) is a mirror pass: push view, translate with **negated Z**, walk children.
 
-#### Prim dispatch (`FUN_00578bb0`)
+#### Prim dispatch (`DispatchMeshPrims` (`FUN_00578bb0`))
 
-Once an instance is bound, the node’s prim batches are walked. Layout matches [Meshes](#meshes-worldrbh-creatrbh). `kind = flags & 0x2007`. Transformed verts are the 0x1c records above (`param_2` is the projected pool; index `i` → `param_2 + i * 0x1c`).
+Once an instance is bound, the node’s prim batches are walked. Layout matches [meshes.md](meshes.md). `kind = flags & 0x2007`. Transformed verts are the 0x1c records above (`param_2` is the projected pool; index `i` → `param_2 + i * 0x1c`).
 
 | kind | Prim | Payload step | Vtable |
 |------|------|--------------|--------|
@@ -1888,19 +2117,21 @@ Once an instance is bound, the node’s prim batches are walked. Layout matches 
 | `0x2001` | Plain quad | +5 shorts | `+0x7c` |
 | `0x2004` | Textured quad | +0x16 shorts | `+0x84` |
 
-Facing test `FUN_00578f60` is a 2D cross product on projected XY. Skip it when `flags & 0x200`. Quads may pass if **either** split triangle faces the camera.
+Facing test `PrimFacingTest` (`FUN_00578f60`) is a 2D cross product on projected XY. Skip it when `flags & 0x200`. Quads may pass if **either** split triangle faces the camera. **Order matters**: `DispatchMeshPrims` runs the clip-AND (all raw corner outcodes ANDed together) and `PrimFacingTest` on those same raw, pre-clip corners *before* geometric clipping. Clipping happens afterward, inside the vtable draw call. Testing facing on an already-clipped polygon is a different test whenever clipping reshapes the shape.
 
 Textured records carry `texPageId` + pixel-space UVs on a 256×256 VVTP page. The rasterizer / D3D path binds that page from the VRAM table (below). This tool’s OBJ export only needs `0x2007` for record size; a viewer must honour `0x200` and the clip AND.
 
+**Quad-to-triangle split is not one fixed convention across mesh kinds.** CREAT quads store their 4 indices in perimeter order, so the fan diagonal `(i0,i1,i2)+(i0,i2,i3)` matches `DispatchMeshPrims`. World quads (`world*.rbh`) are generated on a 2×2 vertex grid — `i0/i1` are one edge, `i2/i3` the opposite edge — so `i0–i2` is a rectangle side, and that same fan produces a bowtie. `-m` writes the four indices as one OBJ face and does not triangulate.
+
 ### Textures (VRAM)
 
-Pixels are VVTP pages ([Textures](#textures-vvtp--vmc)). Runtime:
+Pixels are VVTP pages ([textures.md](textures.md)). Runtime:
 
-1. `FUN_00576610` opens PIFF+VVTP (`0x46464950` / `0x50545656` — comments that say “PVT / FFPV” are the same fourcc read backwards). Each `BODY` registers `pageId` into `DAT_00c6713c` (stride **0x18**, 1000 slots, 24000 bytes). Slot `+0x04` holds the BODY pointer.
-2. `FUN_0041a220` (“Generating Textures”) builds a 64K RGB555 remap: identity, then `table[0] = table[0x8000] = 0x8421`, plus blood-colour overrides from `PTR_DAT_005ce830[DAT_00d5b1fc]`. Applies the table to every page BODY.
-3. `FUN_0045640c` packs 5-bit R/G/B and ORs `0x8000` (engine “priority” bit). Channels other than `0x1f` are snapped to even (`& 0x1e`).
-4. `FUN_00576350` acquires a VRAM slot (vtable `+0x60` / `+0x64`). Overflow logs `VRAM_C_pos*`.
-5. D3D: `FUN_00584130` creates a DirectDraw offscreen surface and binds it as a D3D texture. `FUN_00582ed0` `SetRenderState(TEXTUREHANDLE, …)` then `DrawIndexedPrimitive` (`D3DPT_TRIANGLEFAN` = 6, vertex stride 32). Alpha blend uses render states `0x11` / `0x12` (`SRCBLEND` / `DESTBLEND`).
+1. `LoadPiffVvtp` (`FUN_00576610`) opens PIFF+VVTP (`0x46464950` / `0x50545656` — comments that say “PVT / FFPV” are the same fourcc read backwards). Each `BODY` registers `pageId` into `DAT_00c6713c` (stride **0x18**, 1000 slots, 24000 bytes). Slot `+0x04` holds the BODY pointer.
+2. `GenerateTextures` (`FUN_0041a220`) (“Generating Textures”) builds a 64K RGB555 remap: identity, then `table[0] = table[0x8000] = 0x8421`, plus blood-colour overrides from `PTR_DAT_005ce830[DAT_00d5b1fc]`. Applies the table to every page BODY.
+3. `PackRgb555` (`FUN_0045640c`) packs 5-bit R/G/B and ORs `0x8000` (engine “priority” bit). Channels other than `0x1f` are snapped to even (`& 0x1e`).
+4. `AcquireVramSlot` (`FUN_00576350`) acquires a VRAM slot (vtable `+0x60` / `+0x64`). Overflow logs `VRAM_C_pos*`.
+5. D3D: `CreateD3dTextureSurface` (`FUN_00584130`) creates a DirectDraw offscreen surface and binds it as a D3D texture. `D3dDrawIndexedPrimitive` (`FUN_00582ed0`) `SetRenderState(TEXTUREHANDLE, …)` then `DrawIndexedPrimitive` (`D3DPT_TRIANGLEFAN` = 6, vertex stride 32). Alpha blend uses render states `0x11` / `0x12` (`SRCBLEND` / `DESTBLEND`).
 
 Clear colours `0x0000` and `0x8421` are transparent in this tool’s PNG path; the engine uses the same two as remap sentinels.
 
@@ -1908,34 +2139,57 @@ Page bands (header `pageId`, same numbers as `-p` / mesh `texPageId` / sprite `p
 
 ### Software rasterizers
 
-When the software vtable is active, vtable `+0x78`…`+0x84` land in scanline fillers that write the locked back-buffer (`DAT_00c65380` + `y * pitch`). Affine UVs (no perspective correction on the span). Scratch setup: `FUN_00569510`.
+When the software vtable is active, vtable `+0x78`…`+0x84` pack projected verts into a **0x224-byte prim record**, `ClipProjectedPolygonAgainstClip` (`FUN_005885d0`) clips it, then a scanline filler writes the locked back-buffer (`DAT_00c65380` + `y * pitch`). Affine UVs **on the span** (no perspective correction there). Clip-time UVs are perspective-correct (`InterpolatesClipPlaneVertexAttributes_005893f0` (`FUN_005893f0`): lerp `U·W` / lerp `W`). Before `ScanlineTexturedOpaque` (`FUN_0058ab88`), the camera draw multiplies `U,V` by `1/z`; the span then DDA in 16.16. Scratch setup: `InitMatrixStack` (`FUN_00569510`).
+
+Do not mix in `ClipActivePolygonEdgeList` (`FUN_0058c2d0`) — that is the D3D sibling.
+
+#### Prim record (`0x224`)
+
+| Offset | Field |
+|--------|--------|
+| `+0x07` | Flat colour byte |
+| `+0x08` | Type code (`0x52`/`0x62`/`0x92`/`0xa2`/`0xc92`/`0xca2`) |
+| `+0x0c` / `+0x0e` | Clip-mode flags |
+| `+0x10` | Winding (`1` / `-1`) |
+| `+0x14` | Texture page id |
+| `+0x18` | Vertex count (up to 8 after clip) |
+| `+0x2c` | X[] |
+| `+0x4c` | Y[] |
+| `+0x6c` | `1/z`[] (W after the 0x80000 clip branch) |
+| `+0x8c` | U[] (pixel; `U/z` going into the textured filler) |
+| `+0xac` | V[] |
+| `+0xcc` | Z[] / W |
+
+#### Fillers
 
 | Function | Fill |
 |----------|------|
-| `FUN_0058830d` | Flat (byte / replicated colour) |
-| `FUN_005894ec` | Gouraud, opaque |
-| `FUN_00589e40` | Gouraud, transparent (skip zero source) |
-| `FUN_0058ab88` | Affine textured, opaque |
-| `FUN_0058b5ac` | Affine textured, transparent (skip zero texel) |
-| `FUN_00567c70` | Clip a 2D sprite/tile descriptor to the viewport, adjusting UVs |
-| `FUN_00567f90` | X-dominant Bresenham span |
-| `FUN_00568000` | Y-dominant Bresenham span |
+| `ScanlineFlat` (`FUN_0058830d`) | Flat (byte / replicated colour) |
+| `ScanlineGouraudOpaque` (`FUN_005894ec`) | Gouraud, opaque (page-indexed, not RGB lerp) |
+| `ScanlineGouraudTransparent` (`FUN_00589e40`) | Gouraud, transparent (skip zero source) |
+| `ScanlineTexturedOpaque` (`FUN_0058ab88`) | Affine textured, opaque |
+| `ScanlineTexturedTransparent` (`FUN_0058b5ac`) | Affine textured, transparent (skip zero texel) |
+| `ClipSpriteToViewport` (`FUN_00567c70`) | Clip a 2D sprite/tile descriptor to the viewport, adjusting UVs |
+| `BresenhamSpanX` (`FUN_00567f90`) | X-dominant Bresenham span |
+| `BresenhamSpanY` (`FUN_00568000`) | Y-dominant Bresenham span |
 
-8-bit modes write palette indices; 16-bit modes write RGB555 words.
+Ghidra’s recovered inner loops write **bytes** (palette / texel index). `SetDirectDrawMode` (`FUN_005663d0`) sets 16-bit with `DAT_00c649f4` bit 2 (`4`).
 
-D3D path (`FUN_00582ed0`) does **not** use these fillers. It transforms the same polygon nodes, then `DrawIndexedPrimitive`. Hardware vs software is a backend swap, not a different mesh format.
+No Z-buffer — nearer prims overwrite. The software setup allocates one polygon record (`AllocSoftwarePrimRecord` (`FUN_0057f3c0`)) with **head insertion** into a depth bucket and a depth key from **source** projected corners; `SoftwareDrawCamera` (`FUN_0057cce0`) walks those buckets. `WalkSortedDrawLists` (`FUN_0057a800`) walks a different pair of global object lists — do not treat it as the software primitive opaque/transparent partition.
+
+D3D path (`D3dDrawIndexedPrimitive` (`FUN_00582ed0`)) does **not** use these fillers. It transforms the same polygon nodes, then `DrawIndexedPrimitive`. Hardware vs software is a backend swap, not a different mesh format.
 
 ### Sprites and HUD
 
-`assets/sprite/spr.rbh` is UV/page metadata ([Sprites](#sprites-sprrbh)). BODY base after load is `DAT_005ce544`. `FUN_004430a4` returns `DAT_005ce544[id]`.
+`assets/sprite/spr.rbh` is UV/page metadata ([sprites.md](sprites.md)). BODY base after load is `DAT_005ce544`. `GetSpriteRecord` (`FUN_004430a4`) returns `DAT_005ce544[id]`.
 
-`FUN_004434b0` is a **64×48 scroll-tile stamp**, not a GPU sprite draw. It looks up the sprite record, converts the header UV extent to tile counts (`>> 3`), clips to 0x40×0x30, and writes the sprite id into `PTR_DAT_005d24f4[layer][y * 0x40 + x]`. Out-of-range stamps log `Bogus scroll sprite`. `FUN_00442fa8` sets the screen-space UV rectangle from `DAT_00c64a00` × `DAT_00c64a04`.
+`StampScrollSprite` (`FUN_004434b0`) is a **64×48 scroll-tile stamp**, not a GPU sprite draw. It looks up the sprite record, converts the header UV extent to tile counts (`>> 3`), clips to 0x40×0x30, and writes the sprite id into `PTR_DAT_005d24f4[layer][y * 0x40 + x]`. Out-of-range stamps log `Bogus scroll sprite`. `SetSpriteScreenUvRect` (`FUN_00442fa8`) sets the screen-space UV rectangle from `DAT_00c64a00` × `DAT_00c64a04`.
 
-HUD / score (`FUN_004434b0` with ids such as `0x589` + digit, `0x4f0` lives, `0x504` / `0x505` labels) and UI text (`FUN_00428494` glyphs through vtable `+0xbc`) reuse the same sprite table. Composite a HUD quad with `-s` JSON + `-p` PNGs: `pageId` + `(u0,v0)–(u1,v1)` on a 256×256 page.
+HUD / score (`StampScrollSprite` (`FUN_004434b0`) with ids such as `0x589` + digit, `0x4f0` lives, `0x504` / `0x505` labels) and UI text (`DrawUiGlyph` (`FUN_00428494`) glyphs through vtable `+0xbc`) reuse the same sprite table. Composite a HUD quad with `-s` JSON + `-p` PNGs: `pageId` + `(u0,v0)–(u1,v1)` on a 256×256 page.
 
 ### Event opcodes that poke the renderer
 
-From [Events in detail](#events-in-detail-vm-opcodes-spawns-cameras); these do not add mesh data, they change globals the draw path reads:
+From [events-detailed.md](events-detailed.md); these do not add mesh data, they change globals the draw path reads:
 
 | Op | Name | Effect |
 |----|------|--------|
@@ -1953,20 +2207,20 @@ From [Events in detail](#events-in-detail-vm-opcodes-spawns-cameras); these do n
 
 No `-r` / `--render` flag. To match what the exe would draw for one camera pose:
 
-1. `-c` on `camALL.rbh` — evaluate the six Hermite tracks at integer frame `t`; camera at tracks 0–2, look-at 3–5.
-2. `-m` on `worldN.rbh` — stage OBJ in stage space (no `+0x20` bake). `usemtl page_N` → `-p` PNG.
-3. `-m` on `CREAT1.RBH` / `CREAT2.rbh` plus [Creatures](#creatures-exe-types--creat-ids--vvtp-pages) skeleton walk — instance each bone with the type-row scale.
+1. `-c` on `camALL.rbh` — `sample_camera_group` evaluates the six Hermite tracks at integer frame `t`; camera at tracks 0–2, look-at 3–5. `collect_rail_segments` resolves a `−1` start.
+2. `-m` on `worldN.rbh` — stage OBJ in stage space (no `+0x20` bake). `usemtl page_N` → `-p` PNG. World quads are strip-ordered; do not fan-split them the way CREAT quads split.
+3. `-m` on `CREAT1.RBH` / `CREAT2.rbh` plus [creatures.md](creatures.md) skeleton walk and a [motion.md](motion.md) clip frame. Instance each bone with the type-row scale.
 4. `-p` on `B_RED.VMC` (or `bigger.vmc`) — RGB555 pages; treat `0x0000` / `0x8421` as clear.
 5. `-s` on `spr.rbh` — HUD / FX quads on the same pages.
 6. `-e` on `evtALL.rbh` — which `camGroup` / frame window, sky, and spawns are live.
 
-Facing (`FUN_00578f60`), clip outcodes, and `flags & 0x200` are exe-only; the OBJ dump keeps every prim. Overlay zoom / shake / 2P blend only if matching the exe rather than the authored rail.
+Facing (`PrimFacingTest` (`FUN_00578f60`)), clip outcodes, and `flags & 0x200` are exe-only; the OBJ dump keeps every prim. Overlay zoom / shake / 2P blend only if matching the exe rather than the authored rail. Projection scale is live zoom ([cameras.md](cameras.md)), not a constant in the rail file.
 
 ---
 
 ## Enemy spawn, AI, scoring, and collision (`THOTD.exe`)
 
-How the PC / Tantalus engine creates enemies, ticks their AI, awards score, and resolves gun hits. On-disk spawn records stay in [Events in detail](#events-in-detail-vm-opcodes-spawns-cameras); creature meshes / type rows in [Creatures](#creatures-exe-types--creat-ids--vvtp-pages); the draw path in [Game rendering](#game-rendering-thotdexe).
+How the PC / Tantalus engine creates enemies, ticks their AI, awards score, and resolves gun hits. On-disk spawn records stay in [events-detailed.md](events-detailed.md); creature meshes / type rows in [creatures.md](creatures.md); the draw path in [game-rendering.md](game-rendering.md).
 
 This note is **not** a CLI flag. Pair `-e` on `evtALL.rbh` with the exe tables below. Decomp: `hotd-decomp/THOTD-exe-commented.c`. Bytes checked against `hotd-exe/THOTD.exe` (PE32, image base `0x400000`, 8855552 bytes).
 
@@ -1987,13 +2241,13 @@ Event `typeId` and creature type are **different namespaces**:
 | Spawn functions | `DAT_005d8118` | **136** nonzero / 256 slots (max live index 225) | `ENTB` record `+0x00` |
 | Creature stats | `DAT_005d46ac` | 94 × `0x4C` (92 rows with nonzero model/radius/scale) | `entity+0xd2 >> 16` after spawn init |
 
-`ENTB` (`FUN_0046e5c8`, handler for op `0x0a`) does `call DAT_005d8118[*(record+0)]`. Slot 100 (Stage 01 example) is `0x4a79cc`. Creature skins, scale, and hit radius come later from `FUN_00483ad0` + `DAT_005d46ac`.
+`ENTB` (`EvtOpEntb` (`FUN_0046e5c8`), handler for op `0x0a`) does `call DAT_005d8118[*(record+0)]`. Slot 100 (Stage 01 example) is `0x4a79cc`. Creature skins, scale, and hit radius come later from `ApplyCreatureTypeStats` (`FUN_00483ad0`) + `DAT_005d46ac`.
 
 ### Event VM (spawn source)
 
 Retail `evtALL.rbh`: 9 stage slots, 66 scenes, 522 events, **1653** spawn records (from `-e`, not the exe).
 
-Packed playhead (same as [Events in detail](#events-in-detail-vm-opcodes-spawns-cameras) / [Cutscenes](#cutscenes-thotdexe)):
+Packed playhead (same as [events-detailed.md](events-detailed.md) / [cutscenes.md](cutscenes.md)):
 
 | Address | Role |
 |---------|------|
@@ -2004,69 +2258,69 @@ Packed playhead (same as [Events in detail](#events-in-detail-vm-opcodes-spawns-
 | `DAT_00da0a98` | Yield flag (wait ops) |
 | `DAT_00d5a5d0` | evtALL BODY base |
 
-Bind `FUN_004c0d3c` (`0x4c0d3c`): `PC = stages[StageNo][SceneNo][EventNo]`.
+Bind `BindEventPlayhead` (`FUN_004c0d3c`): `PC = stages[StageNo][SceneNo][EventNo]`.
 
-Tick `FUN_004c0db0`: `opcode = *PC`; `call [DAT_005eeac0 + opcode*4]`. Idle / unnamed slots are `LAB_00471658` (44 of 96). Names are packed C strings at `0x5a3a00` (`0x00 : nop` … `0x5d : NEXTEV`). Exe spellings that differ from the short names in the decoder:
+Tick `TickEventVm` (`FUN_004c0db0`): `opcode = *PC`; `call [DAT_005eeac0 + opcode*4]`. Idle / unnamed slots are `EventVmNop` (`LAB_00471658`) (44 of 96). Names are packed C strings at `0x5a3a00` (`0x00 : nop` … `0x5d : NEXTEV`). Exe spellings that differ from the short names in the decoder:
 
 | Op | Exe string | Handler |
 |----|------------|---------|
 | `0x02` / `0x06` | `ET1P` / `ET2P` (not `ET1P1` / `ET2P1`) | same as `ET1PE` / `ET2PE` families |
-| `0x50` | `WAIT_ENNUM/EVCOM/EVTB1` | `FUN_004c0fc4` — wait while spawn-gen `DAT_00da0ccc` high u16 `<` arg |
-| `0x55` | `WAIT_ENALV/EVTB6` | `FUN_004c121c` — wait while enemies-alive `DAT_00da0cd0` `>` arg |
-| `0x1e` / `0x34` / `0x59` | `PLTB` / `BRTB` / `EBLFNSH` | **nop** (`LAB_00471658`) — names only |
+| `0x50` | `WAIT_ENNUM/EVCOM/EVTB1` | `EvtOpWaitEnnum` (`FUN_004c0fc4`) — wait while spawn-gen `DAT_00da0ccc` high u16 `<` arg |
+| `0x55` | `WAIT_ENALV/EVTB6` | `EvtOpWaitEnalv` (`FUN_004c121c`) — wait while enemies-alive `DAT_00da0cd0` `>` arg |
+| `0x1e` / `0x34` / `0x59` | `PLTB` / `BRTB` / `EBLFNSH` | **nop** (`EventVmNop` (`LAB_00471658`)) — names only |
 
-`ET1PE`…`ET1P3` / `ET2PE`…`ET2P3` share two handlers (`FUN_0046e548` / `FUN_0046e588`). `TEXCHG` (`0x4f`) shares `FUN_004c1514` with `GGSET`.
+`ET1PE`…`ET1P3` / `ET2PE`…`ET2P3` share two handlers (`EvtOpEt1pSpawn` (`FUN_0046e548`) / `EvtOpEt2pSpawn` (`FUN_0046e588`)). `TEXCHG` (`0x4f`) shares `EvtOpGgsetTexchg` (`FUN_004c1514`) with `GGSET`.
 
 ### Spawn path
 
 ```
-ENTB* list  →  DAT_005d8118[typeId]  →  FUN_0043e400  →  copy record
-                                                    →  FUN_00483ad0 (if creature)
-                                                    →  FUN_004a5180 / species init
-                                                    →  FUN_0046ee90 live slot
+ENTB* list  →  DAT_005d8118[typeId]  →  `AllocEntity` (`FUN_0043e400`)  →  copy record
+                                                    →  `ApplyCreatureTypeStats` (`FUN_00483ad0`) (if creature)
+                                                    →  `InitSpawnedCreature` (`FUN_004a5180`) / species init
+                                                    →  `ClaimEnemyLiveSlot` (`FUN_0046ee90`) live slot
 ```
 
-1. **Allocate** `FUN_0043e400`: writes `DAT_005cd2fc = 0x1a`, links a child node, unique id at `DAT_00d6ca20`. Gameplay fields run well past that header (past `+0x3cc`).
-2. **ENTB copy** (`FUN_0046e5c8`, bytes at `0x46e628`):
+1. **Allocate** `AllocEntity` (`FUN_0043e400`): writes `DAT_005cd2fc = 0x1a`, links a child node, unique id at `DAT_00d6ca20`. Gameplay fields run well past that header (past `+0x3cc`).
+2. **ENTB copy** (`EvtOpEntb` (`FUN_0046e5c8`), bytes at `0x46e628`):
    - `record+0x04 | 1` → `entity+0x60`
    - `record+0x24` (u8) → `entity+0xd4` (`spawnEventId`)
    - `record+0x25` → `entity+0x6c`
    - `record+0x22` (u16) → **both** `entity+0x78` and `+0x7a` (combat HP)
    - `record+0x20 & 3` = posMode: `0` copies six floats from `+0x08` (XYZ + RX/RY/RZ); `1`/`2` transform
-3. **Type stats** `FUN_00483ad0`: `entity+0x60 |= 0x401`; `DAT_005d46ac[type]+0x00` → `+0x5c` (model); `+0x14` fld → `fstp [entity+0x98]`; `+0x28` → scale at `+0x9c`.
-4. **Live registry** `FUN_004a5180` increments u16 `DAT_00da0ccc+2` (spawn generation) and `DAT_00da0cd0` (enemies-alive), then `FUN_0046ee90` claims slot **2..12** (`eax < 0x0D`) in `DAT_00da0040` (stride `0x14`), stores index at `entity+0x2ef`.
-5. Stage reset `FUN_004c1524` zeros `DAT_00da0cd0` / spawn-tracking. `SCNINIT` (`FUN_004c15b4`) resets camera slots (and related score/camera globals) at scene start.
+3. **Type stats** `ApplyCreatureTypeStats` (`FUN_00483ad0`): `entity+0x60 |= 0x401`; `DAT_005d46ac[type]+0x00` → `+0x5c` (model); `+0x14` fld → `fstp [entity+0x98]`; `+0x28` → scale at `+0x9c`.
+4. **Live registry** `InitSpawnedCreature` (`FUN_004a5180`) increments u16 `DAT_00da0ccc+2` (spawn generation) and `DAT_00da0cd0` (enemies-alive), then `ClaimEnemyLiveSlot` (`FUN_0046ee90`) claims slot **2..12** (`eax < 0x0D`) in `DAT_00da0040` (stride `0x14`), stores index at `entity+0x2ef`.
+5. Stage reset `ResetStageEnemyCounts` (`FUN_004c1524`) zeros `DAT_00da0cd0` / spawn-tracking. `SCNINIT` (`EvtOpScninit` (`FUN_004c15b4`)) resets camera slots (and related score/camera globals) at scene start.
 
-Some FX spawners cap children with `DAT_005d7f6c < 9` (BSS; zero in the image). Secondary waves still go through `FUN_0043e400` (`FUN_00482bf8`, `FUN_004822b8`, `FUN_004815a4`, `FUN_0047e664`, bonus `FUN_004ea460` / `FUN_004c4c60`).
+Some FX spawners cap children with `DAT_005d7f6c < 9` (BSS; zero in the image). Secondary waves still go through `AllocEntity` (`FUN_0043e400`) (`SpawnSecondaryWave` (`FUN_00482bf8`), `SpawnSecondaryWaveB` (`FUN_004822b8`), `SpawnSecondaryWaveC` (`FUN_004815a4`), `SpawnSecondaryWaveD` (`FUN_0047e664`), bonus `SpawnBonusWave` (`FUN_004ea460`) / `SpawnBonusWaveB` (`FUN_004c4c60`)).
 
-Record layout: [Events in detail](#events-in-detail-vm-opcodes-spawns-cameras) (`ENTB` 0x28 bytes, `ENTB2` 8 bytes, `ENTBE` ≥ 0x24).
+Record layout: [events-detailed.md](events-detailed.md) (`ENTB` 0x28 bytes, `ENTB2` 8 bytes, `ENTBE` ≥ 0x24).
 
 ### Behavior
 
-`entity+0x00` is the tick callback. `FUN_004a5180` (20-way on `spawnEventId`) installs it, logs `ENGuard_BO_zonbiman` when type `== 0x10`, and claims the live slot. Shared per-frame body: `FUN_00477b00` (skeleton sample `FUN_004776c8`, transform, cull, submit).
+`entity+0x00` is the tick callback. `InitSpawnedCreature` (`FUN_004a5180`) (20-way on `spawnEventId`) installs it, logs `ENGuard_BO_zonbiman` when type `== 0x10`, and claims the live slot. Shared per-frame body: `TickEnemyShared` (`FUN_00477b00`) (skeleton sample `SampleSkeleton` (`FUN_004776c8`), transform, cull, submit).
 
 | Function | Role |
 |----------|------|
-| `FUN_0046a91c` / `FUN_0046a984` | Quadratic path; waypoints at `+0x39c…+0x3b0`, duration `+0x2f8`; writes XYZ |
-| `FUN_0046ab60` / `FUN_0046ac40` | Same spline → velocity `+0x80/+0x84/+0x88` |
-| `FUN_0046ae0c` | Target player `+0x2f0` = P1 / P2 / random; skips a gun if `DAT_00da0cb4/cb5` (grab lock) |
-| `FUN_0046ad04` / `FUN_0046ada0` | Quadrant vs player XZ `DAT_00d9f038/040`; yaw `0 / 0x4000 / 0x8000 / 0xc000` |
-| `FUN_0046b4a8` | Nearest allied zombie in the live-slot table (homing) |
-| `FUN_0046af9c` | Clamp X/Z to screen walls `DAT_00da0bac/b9c/ba8/ba4`; damp velocity; `+0x32c` bit 7 |
-| `FUN_0046b27c` | 3D wall: if depth `>` `DAT_00da0ba4`, clamp and damp |
-| `FUN_004a4e2c` | After emerge: walk/attack layers; default tick `LAB_004d9a90` |
-| `FUN_004a3578` | Patrol AI when `DAT_00da0bd8 == 2` (bonus / time-attack) |
-| `FUN_004fe320` | Attack phases via `+0x340` |
-| `FUN_004fe53c` | Grab: aim, 30-frame quadratic lunge, wall-clamp, sink, release |
-| `FUN_00505f50` | Buried emerge: snap to floor `DAT_00da0b48`; 48 frames then chase |
-| `FUN_004fe118` | Hit tick: if `+0x61` bit 0, subtract damage u16 from `+0x78` |
-| `FUN_004a3064` | Death: clear live bit, `DAT_00da0cd0 -= 1`, swap vtable |
-| `FUN_004aba08` | Defeat: `DAT_00da0cd6` / `DAT_00da0cc6` += 1; **+400** score if player state `DAT_00d9f05c == 5` (`call FUN_00437344` with `edx = 0x190`) |
-| `FUN_004d94b0` | Knockdown: Y vel −0.5, sink, wait `0x28` frames, despawn |
+| `EnemyQuadraticPathXyz` (`FUN_0046a91c`) / `EnemyQuadraticPathXyzAlt` (`FUN_0046a984`) | Quadratic path; waypoints at `+0x39c…+0x3b0`, duration `+0x2f8`; writes XYZ |
+| `EnemyQuadraticPathVelocity` (`FUN_0046ab60`) / `EnemyQuadraticPathVelocityAlt` (`FUN_0046ac40`) | Same spline → velocity `+0x80/+0x84/+0x88` |
+| `EnemyPickTargetPlayer` (`FUN_0046ae0c`) | Target player `+0x2f0` = P1 / P2 / random; skips a gun if `DAT_00da0cb4/cb5` (grab lock) |
+| `EnemyFacePlayerQuadrant` (`FUN_0046ad04`) / `EnemyFacePlayerQuadrantAlt` (`FUN_0046ada0`) | Quadrant vs player XZ `DAT_00d9f038/040`; yaw `0 / 0x4000 / 0x8000 / 0xc000` |
+| `FindNearestAlliedZombie` (`FUN_0046b4a8`) | Nearest allied zombie in the live-slot table (homing) |
+| `ClampEnemyToScreenWalls` (`FUN_0046af9c`) | Clamp X/Z to screen walls `DAT_00da0bac/b9c/ba8/ba4`; damp velocity; `+0x32c` bit 7 |
+| `ClampEnemyToDepthWall` (`FUN_0046b27c`) | 3D wall: if depth `>` `DAT_00da0ba4`, clamp and damp |
+| `EnemyAfterEmergeWalkAttack` (`FUN_004a4e2c`) | After emerge: walk/attack layers; default tick `EnemyDefaultTick` (`LAB_004d9a90`) |
+| `EnemyPatrolAi` (`FUN_004a3578`) | Patrol AI when `DAT_00da0bd8 == 2` (bonus / time-attack) |
+| `EnemyAttackPhases` (`FUN_004fe320`) | Attack phases via `+0x340` |
+| `EnemyGrabLunge` (`FUN_004fe53c`) | Grab: aim, 30-frame quadratic lunge, wall-clamp, sink, release |
+| `EnemyBuriedEmerge` (`FUN_00505f50`) | Buried emerge: snap to floor `DAT_00da0b48`; 48 frames then chase |
+| `EnemyApplyHitDamage` (`FUN_004fe118`) | Hit tick: if `+0x61` bit 0, subtract damage u16 from `+0x78` |
+| `EnemyDeath` (`FUN_004a3064`) | Death: clear live bit, `DAT_00da0cd0 -= 1`, swap vtable |
+| `EnemyDefeatScore` (`FUN_004aba08`) | Defeat: `DAT_00da0cd6` / `DAT_00da0cc6` += 1; **+400** score if player state `DAT_00d9f05c == 5` (`call `AddPlayerScore` (`FUN_00437344`)` with `edx = 0x190`) |
+| `EnemyKnockdown` (`FUN_004d94b0`) | Knockdown: Y vel −0.5, sink, wait `0x28` frames, despawn |
 
 Motion names: 674 pointers at `DAT_005f1258`, first `MO_b1_atk_a`, last `MO_z_ono_kick`. Prefix counts from this exe: `z` 192, `k` 80, `p` 53, `saru` 49, `ebitb` 39, `boss4` 32, `b3` 28, `b1` 23, `dr` 20, `s` 19, `b2` 16, `mol` 13, `gman` 12, `frog` 11. (`zonbi1` 4 sits beside `z`; `dog`/`inu`/`ddogg*` together match the older “dog/inu 23” grouping.)
 
-Type-row floats checked in this image (matches [Creatures](#creatures-exe-types--creat-ids--vvtp-pages)):
+Type-row floats checked in this image (matches [creatures.md](creatures.md)):
 
 | Type | Model | Bones | Scale | `+0x14` (hit radius) |
 |-----:|------:|------:|------:|---------------------:|
@@ -2083,20 +2337,20 @@ Type 0’s `0x4C` row is all zeros; bone count is still 21.
 
 Player block stride **0xCC** (`0x33` dwords). Score `DAT_00d9f064[slot]`, lives `DAT_00d9f068[slot]`, state `DAT_00d9f05c[slot]`.
 
-`FUN_00437344`: `score += edx`, clamp at 0. Confirmed: `add eax, 0x00d9f058` then `[eax+0x0c]` is `DAT_00d9f064`.
+`AddPlayerScore` (`FUN_00437344`): `score += edx`, clamp at 0. Confirmed: `add eax, 0x00d9f058` then `[eax+0x0c]` is `DAT_00d9f064`.
 
 | Event | Function | Effect (this exe) |
 |-------|----------|-------------------|
-| Hit-zone tree | `FUN_004c3d58` → `FUN_004c4168` | Per-type tables `DAT_00523a58` / `DAT_00527344` / `DAT_00538d44` (in `BEGTEXT`). Damage u16 lands in `DAT_00da0cc4` (`DAT_00da0cc2` high word). Route totals `DAT_00da6244`. |
-| Kill | `FUN_004aba08` | Counters += 1; **+400** if `DAT_00d9f05c[player] == 5` |
-| Life lost | `FUN_00436fe4` | `dec` lives; `sub ebp, 0x64` (−100 score, floor 0); continue timer `DAT_00d9f050 = 0x5a` (90 frames) |
-| Shot outside rect | `FUN_004371b8` | Perspective-divide vs `DAT_005a1ba2…`; miss path calls `FUN_00436fe4` then another −100 |
-| 1UP | `FUN_00437304` | Lives += 1 if below cap `DAT_00da0cec` |
-| HUD digits | `FUN_0051a598` | `cmp esi, 99999` (`0x1869f`); sprite **`0x589` + digit** (six immediates in the function). Lives sprite `0x4f0`; labels `0x504` / `0x505` in the same HUD cluster |
+| Hit-zone tree | `ScoreHitZoneTree` (`FUN_004c3d58`) → `ScoreHitZoneApply` (`FUN_004c4168`) | Per-type tables `DAT_00523a58` / `DAT_00527344` / `DAT_00538d44` (in `BEGTEXT`). Damage u16 lands in `DAT_00da0cc4` (`DAT_00da0cc2` high word). Route totals `DAT_00da6244`. |
+| Kill | `EnemyDefeatScore` (`FUN_004aba08`) | Counters += 1; **+400** if `DAT_00d9f05c[player] == 5` |
+| Life lost | `LoseLife` (`FUN_00436fe4`) | `dec` lives; `sub ebp, 0x64` (−100 score, floor 0); continue timer `DAT_00d9f050 = 0x5a` (90 frames) |
+| Shot outside rect | `ShotMissOutsideRect` (`FUN_004371b8`) | Perspective-divide vs `DAT_005a1ba2…`; miss path calls `LoseLife` (`FUN_00436fe4`) then another −100 |
+| 1UP | `ExtraLife` (`FUN_00437304`) | Lives += 1 if below cap `DAT_00da0cec` |
+| HUD digits | `DrawHudScoreDigits` (`FUN_0051a598`) | `cmp esi, 99999` (`0x1869f`); sprite **`0x589` + digit** (six immediates in the function). Lives sprite `0x4f0`; labels `0x504` / `0x505` in the same HUD cluster |
 
 `DAT_00d9f05c == 5` is the “this player is in the scoring/playing state” gate used by kill bonus and several route helpers — not a difficulty id.
 
-High scores: string `scores.cfg` at VA `0x5a1118`, pointer `DAT_005ce8b0`. Load/reset and write live in the UI cluster around `FUN_0042556c` (sort **10** entries, stride **`0x1c`**: `cmp ebx, 0x0A` / `imul eax, ebx, 0x1C`). Insert `FUN_004b4bf8` uses thresholds `DAT_005d29d8 = 14000` and `DAT_005d29cc = 16000`. Fatal: `Failed to write highscores file=%s` (spaces, not underscores). Grade `FUN_00420004`: float ≤ `DAT_005ce4c0` (**200**) → `'X'` (`0x58`); ≤ `DAT_005ce4c4` (**300**) → `'Y'`; else `'Z'`.
+High scores: string `scores.cfg` at VA `0x5a1118`, pointer `DAT_005ce8b0`. Load/reset and write live in the UI cluster around `SortHighScores` (`FUN_0042556c`) (sort **10** entries, stride **`0x1c`**: `cmp ebx, 0x0A` / `imul eax, ebx, 0x1C`). Insert `InsertHighScore` (`FUN_004b4bf8`) uses thresholds `DAT_005d29d8 = 14000` and `DAT_005d29cc = 16000`. Fatal: `Failed to write highscores file=%s` (spaces, not underscores). Grade `GradeFromTime` (`FUN_00420004`): float ≤ `DAT_005ce4c0` (**200**) → `'X'` (`0x58`); ≤ `DAT_005ce4c4` (**300**) → `'Y'`; else `'Z'`.
 
 ### Collision (gun hits)
 
@@ -2104,19 +2358,19 @@ Not a mesh ray. Per-frame sphere queue, then a separate stage-mesh ray for playe
 
 | Step | Function | This exe |
 |------|----------|----------|
-| Clear | `FUN_00489b94` | Zeros `DAT_00da39f0` (0x24-byte results, `add eax, 0x24` loop), `DAT_00da25f0` depth keys, `DAT_00da2df0` candidates |
-| Enqueue | `FUN_00489c18` via `FUN_00483c10` | Live bit `+0x60` bit 0; projected center at `+0x40/+0x44/+0x48` |
-| Per player | `FUN_00489c84` | `test ah, 2` on `DAT_00d9f060` (shot this frame); `call FUN_00489d0c`; `and byte […+DAT_00d9f060], 0xFD` |
-| Sphere | `FUN_00489d0c` → `FUN_00414aac` | `push [ebp+0x98]` as radius; `push [ebp+0x40/44/48]`. If `DAT_005ced98 == 5`, radius × CRT/lightgun table |
-| Children | `FUN_00489e2c` | Tree at `entity+0xd0`; count `[tree+0x34]`; only if `entity+0x74` bit 0 |
-| Sort | `FUN_0048a44c` | `sub esp, 0x400` (256-int histogram); 16-pass radix on packed depth |
-| Apply | `FUN_00489fbc` | Sets `+0x60` player bit and `+0x61` bit 0; hit XYZ in `DAT_00d9ef60`; optional splatter `FUN_0046bf8c` |
+| Clear | `ClearGunHitQueue` (`FUN_00489b94`) | Zeros `DAT_00da39f0` (0x24-byte results, `add eax, 0x24` loop), `DAT_00da25f0` depth keys, `DAT_00da2df0` candidates |
+| Enqueue | `EnqueueGunHitCandidate` (`FUN_00489c18`) via `ProjectHitSphereCenter` (`FUN_00483c10`) | Live bit `+0x60` bit 0; projected center at `+0x40/+0x44/+0x48` |
+| Per player | `ProcessPlayerGunShots` (`FUN_00489c84`) | `test ah, 2` on `DAT_00d9f060` (shot this frame); `call `TestGunHitSphere` (`FUN_00489d0c`)`; `and byte […+DAT_00d9f060], 0xFD` |
+| Sphere | `TestGunHitSphere` (`FUN_00489d0c`) → `SphereHitTest` (`FUN_00414aac`) | `push [ebp+0x98]` as radius; `push [ebp+0x40/44/48]`. If `DAT_005ced98 == 5`, radius × CRT/lightgun table |
+| Children | `WalkChildHitVolumes` (`FUN_00489e2c`) | Tree at `entity+0xd0`; count `[tree+0x34]`; only if `entity+0x74` bit 0 |
+| Sort | `SortHitsByDepth` (`FUN_0048a44c`) | `sub esp, 0x400` (256-int histogram); 16-pass radix on packed depth |
+| Apply | `ApplyGunHits` (`FUN_00489fbc`) | Sets `+0x60` player bit and `+0x61` bit 0; hit XYZ in `DAT_00d9ef60`; optional splatter `SpawnHitSplatter` (`FUN_0046bf8c`) |
 
-**`DAT_005d46ac+0x14` is the hit-sphere radius, not combat HP.** `FUN_00483ad0` `fstp`s it to `entity+0x98`; `FUN_00489d0c` pushes that float into `FUN_00414aac`. Combat HP is the ENTB u16 at `+0x22` → `entity+0x78`, drained by `FUN_004fe118` (`mov si, [ebx+0x78]; sub si, cx` with `cx` from `DAT_00da0cc4`). Magician 12 vs Hermit 2.6 is aim-circle size.
+**`DAT_005d46ac+0x14` is the hit-sphere radius, not combat HP.** `ApplyCreatureTypeStats` (`FUN_00483ad0`) `fstp`s it to `entity+0x98`; `TestGunHitSphere` (`FUN_00489d0c`) pushes that float into `SphereHitTest` (`FUN_00414aac`). Combat HP is the ENTB u16 at `+0x22` → `entity+0x78`, drained by `EnemyApplyHitDamage` (`FUN_004fe118`) (`mov si, [ebx+0x78]; sub si, cx` with `cx` from `DAT_00da0cc4`). Magician 12 vs Hermit 2.6 is aim-circle size.
 
-Stage plant: `FUN_0048a15c` walks collision-mesh slots (`DAT_00da0bb4`). Camera path uses ray `(eye.x, 32768, eye.z)` — same Y as the shadow pass ([Game rendering](#game-rendering-thotdexe)). Screen-space helper `FUN_0043db5c` returns 1 / 2 / 4 (off / graze / solid).
+Stage plant: `RaycastStageFloor` (`FUN_0048a15c`) walks collision-mesh slots (`DAT_00da0bb4`). Camera path uses ray `(eye.x, 32768, eye.z)` — same Y as the shadow pass ([game-rendering.md](game-rendering.md)). Screen-space helper `ScreenSpaceHitKind` (`FUN_0043db5c`) returns 1 / 2 / 4 (off / graze / solid).
 
-Collision tree alloc: `FUN_00478b64` from skeleton `DAT_005ef8e0[type]`, pointer at `entity+0xd0`. Same tree is walked for scoring (`FUN_004c3d58`).
+Collision tree alloc: `AllocCollisionTree` (`FUN_00478b64`) from skeleton `DAT_005ef8e0[type]`, pointer at `entity+0xd0`. Same tree is walked for scoring (`ScoreHitZoneTree` (`FUN_004c3d58`)).
 
 ### Entity field map
 
@@ -2124,23 +2378,22 @@ Offsets from the callers above (BSS entity, not a file struct).
 
 | Offset | Field | Set by | Read by |
 |--------|-------|--------|---------|
-| `+0x00` | Tick vtable | `FUN_004a5180` / death | Entity pump |
+| `+0x00` | Tick vtable | `InitSpawnedCreature` (`FUN_004a5180`) / death | Entity pump |
 | `+0x28/+0x2c/+0x30` | XYZ | ENTB / path tick | Draw, AI, collision |
 | `+0x34/+0x38/+0x3c` | Fixed-point RX/RY/RZ | ENTB / quadrant | Matrix |
-| `+0x40/+0x44/+0x48` | Hit-sphere center | `FUN_00483c10` | `FUN_00414aac` |
-| `+0x5c` | CREAT model id | `FUN_00483ad0` / spawnEventId maps | Draw `FUN_0043d7f8` |
-| `+0x60` | Flags (bit 0 live; bits 1–2 P1/P2 hit) | ENTB, `FUN_00489fbc` | Enqueue / death |
-| `+0x61` bit 0 | Hit this frame | `FUN_00489fbc` | `FUN_004fe118` |
-| `+0x74` bit 0 | Walk child volumes | Spawn init | `FUN_00489d0c` |
-| `+0x78` | Combat HP (s16) | ENTB `+0x22` | `FUN_004fe118` |
+| `+0x40/+0x44/+0x48` | Hit-sphere center | `ProjectHitSphereCenter` (`FUN_00483c10`) | `SphereHitTest` (`FUN_00414aac`) |
+| `+0x5c` | CREAT model id | `ApplyCreatureTypeStats` (`FUN_00483ad0`) / spawnEventId maps | Draw `EnqueueOpaqueIfLive` (`FUN_0043d7f8`) |
+| `+0x60` | Flags (bit 0 live; bits 1–2 P1/P2 hit) | ENTB, `ApplyGunHits` (`FUN_00489fbc`) | Enqueue / death |
+| `+0x61` bit 0 | Hit this frame | `ApplyGunHits` (`FUN_00489fbc`) | `EnemyApplyHitDamage` (`FUN_004fe118`) |
+| `+0x74` bit 0 | Walk child volumes | Spawn init | `TestGunHitSphere` (`FUN_00489d0c`) |
+| `+0x78` | Combat HP (s16) | ENTB `+0x22` | `EnemyApplyHitDamage` (`FUN_004fe118`) |
 | `+0x80/+0x84/+0x88` | Velocity | Spline / jitter | Wall clamp |
-| `+0x98` | Hit radius (f32) | Type table `+0x14` | `FUN_00414aac` |
+| `+0x98` | Hit radius (f32) | Type table `+0x14` | `SphereHitTest` (`FUN_00414aac`) |
 | `+0x9c` | Scale | Type table `+0x28` | Submit |
-| `+0xd0` | Collision tree | `FUN_00478b64` | Hits + score tree |
+| `+0xd0` | Collision tree | `AllocCollisionTree` (`FUN_00478b64`) | Hits + score tree |
 | `+0xd4` | spawnEventId | ENTB `+0x24` | AI / waves |
-| `+0x2ef` | Live-slot index | `FUN_0046ee90` | Homing scan |
-| `+0x2f0` | Target player | `FUN_0046ae0c` | Score / grab |
-| `+0x3cc` | Path / death flags | `FUN_0046a91c` | Knockdown |
+| `+0x2ef` | Live-slot index | `ClaimEnemyLiveSlot` (`FUN_0046ee90`) | Homing scan |
+| `+0x2f0` | Target player | `EnemyPickTargetPlayer` (`FUN_0046ae0c`) | Score / grab |
+| `+0x3cc` | Path / death flags | `EnemyQuadraticPathXyz` (`FUN_0046a91c`) | Knockdown |
 
 Globals: `DAT_00da0cd0` enemies-alive (`WAIT_ENALV`), `DAT_00da0ccc` high u16 spawn generation (`WAIT_ENNUM`), `DAT_00da0cd6` / `DAT_00da0cc6` kill counters, `DAT_00d9f038/03c/040` player XYZ, `DAT_00da0b48` floor (`FKRTB`).
-

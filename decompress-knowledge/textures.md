@@ -2,7 +2,7 @@
 
 Texture **pixels** live in PIFF form **VVTP** files, usually with a `.vmc` extension. They are not RBHF. Sprite UVs in `spr.rbh` only *name* pages in these banks.
 
-Decomp: `FUN_00576610` loads PIFF+VVTP and registers BODY pages; `FUN_0045640c` packs RGB555 with the `0x8000` bit; `FUN_0041a220` remaps colours (“Generating Textures”).
+Decomp: `LoadPiffVvtp` (`FUN_00576610`) loads PIFF+VVTP and registers BODY pages; `PackRgb555` (`FUN_0045640c`) packs RGB555 with the `0x8000` bit; `GenerateTextures` (`FUN_0041a220`) remaps colours (“Generating Textures”).
 
 ## File
 
@@ -35,11 +35,11 @@ offset  size  field
 0x40    w*h*2 pixels, RGB555, row-major
 ```
 
-Detection used by `src/texture.ts`: `headerSize == 0x40`, non-zero size ≤ 4096, RGB masks as above, and payload long enough for the pixel array.
+Detection used by `src/hotd_decompress/texture.py`: `headerSize == 0x40`, non-zero size ≤ 4096, RGB masks as above, and payload long enough for the pixel array.
 
 ## Pixel format
 
-Engine format is **RGB555 plus bit 15** (`FUN_0045640c` ORs `0x8000` onto packed colours):
+Engine format is **RGB555 plus bit 15** (`PackRgb555` (`FUN_0045640c`) ORs `0x8000` onto packed colours):
 
 ```
 15        10  9         5  4         0
@@ -55,9 +55,9 @@ Two values are treated as transparent (engine clear colours):
 | Word | Role |
 |------|------|
 | `0x0000` | Clear |
-| `0x8421` | Clear (`TEXTURE_CLEAR` in `src/texture.ts`) |
+| `0x8421` | Clear (`TEXTURE_CLEAR` in `src/hotd_decompress/texture.py`) |
 
-`FUN_0041a220` seeds a 64K remap table with `table[0] = 0x8421` and `table[0x8000] = 0x8421`, then applies blood-colour overrides.
+`GenerateTextures` (`FUN_0041a220`) seeds a 64K remap table with `table[0] = 0x8421` and `table[0x8000] = 0x8421`, then applies blood-colour overrides.
 
 ## Creature banks
 
@@ -79,19 +79,21 @@ The exe can remap `texture.VMC` at runtime instead of shipping the `B_*` files.
 ## How the tool works
 
 ```text
-bun run index.ts -p|--png <file.vmc|file.rbh> [outdir]
+uv run hotd-decompress -p|--png <file.vmc|file.rbh> [outdir]
 ```
 
-`convertTexturesToPng` (`src/texture.ts`):
+`convert_textures_to_png` (`src/hotd_decompress/texture.py`):
 
-1. `loadPiff` + `decompressPiff` — packed `B_*` pages become BODY in memory.
-2. Keep chunks tagged `BODY` whose payload passes `isTexturePage` (0x40 header, RGB555 masks, size fits).
-3. `parseTexturePage` → `rgb555ToRgba` (`0x0000` and `0x8421` → alpha 0) → `encodePng` (`src/png.ts`).
+1. `load_piff` + `decompress_piff` — packed `B_*` pages become BODY in memory.
+2. Keep chunks tagged `BODY` whose payload passes `is_texture_page` (0x40 header, RGB555 masks, size fits).
+3. `parse_texture_page` → `rgb555_to_rgba` (`0x0000` and `0x8421` → alpha 0) → `encode_png` (`src/hotd_decompress/png.py`).
 4. Write `page_<pageId padded to 4 digits>.png`. Default dir: `decompressed_assets/<stem>_png/`.
+
+`encode_png` writes 8-bit RGBA, filter 0. IDAT is `zlib.compress`. The TypeScript port uses Node `deflateSync`, so the PNG file bytes differ while the RGBA pixels match.
 
 Stdout: page count, first page `width×height`, skipped non-texture chunks, files written.
 
-If **zero** pages match, the CLI exits 1 and reminds you that `spr.rbh` is metadata — use a `.vmc`. Running `-p` on an RBHF that is not VVTP pages fails the same way.
+If **zero** pages match, the CLI exits 1 and reminds you that `spr.rbh` is metadata — use a `.vmc`. A batch walk (`-p --all`, or `-p` on a directory) counts that as a skip. Running `-p` on an RBHF that is not VVTP pages fails the same way.
 
 `-d` on the same `.vmc` writes a decompressed PIFF (`*.decomp.VMC`) with one BODY per page; `-p` does not write that PIFF, only PNGs.
 

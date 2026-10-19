@@ -4,7 +4,7 @@
 
 Opcodes, spawn records, and `CCTB` → `camALL` binds: [events-detailed.md](events-detailed.md). How those scripts play as in-engine cutscenes (no FMV): [cutscenes.md](cutscenes.md).
 
-Decomp: root table `DAT_00d5a5d0`. `FUN_00422808` counts scenes per stage for the debug UI (stops at the first `-1` / `0xFFFFFFFF`). Gameplay bind is `0x4c0d3c`; the tick at `0x4c0db0` dispatches `handlers[opcode]` at `0x005eeac0`.
+Decomp: root table `DAT_00d5a5d0`. `CountStagesForSelectUi` (`FUN_00422808`) counts scenes per stage for the debug UI (stops at the first `-1` / `0xFFFFFFFF`). Gameplay bind is `BindEventPlayhead` (`0x4c0d3c`); the tick at `TickEventVm` (`0x4c0db0`) dispatches `handlers[opcode]` at `0x005eeac0`.
 
 ## Container
 
@@ -60,14 +60,14 @@ Event tables use **`0xFFFFFFFF` as null / terminator**. Do not confuse with worl
 ## How the tool works
 
 ```text
-bun run index.ts -e|--evt <file.rbh> [outdir]
+uv run hotd-decompress -e|--evt <file.rbh> [outdir]
 ```
 
-`convertEventsToJson` (`src/event.ts`) uses `loadRbh` (no PACK expand). Retail `evtALL.rbh` is already BODY.
+`convert_events_to_json` (`src/hotd_decompress/event.py`) uses `load_rbh` (no PACK expand). Retail `evtALL.rbh` is already BODY.
 
 1. Require one BODY whose first pointer looks like a root table (`firstPtr ≤ 0x400`, 4-aligned, in-range).
 2. Read `firstPtr/4` stage slots, keeping mid-list `0xFFFFFFFF`.
-3. For each live stage: `readPointerTable` for scenes (stop at `0xFFFFFFFF`).
+3. For each live stage: `read_pointer_table` for scenes (stop at `0xFFFFFFFF`).
 4. Collect every section offset; bound each by the next offset in BODY order.
 5. Walk opcodes (names from exe `0x5a3a00`). Deref `ENTB*` spawn records and `CCTB` job `0x40` rail binds.
 6. Write `events.json`. Default dir: `decompressed_assets/<stem>_evt/`.
@@ -115,4 +115,4 @@ JSON shape:
 }
 ```
 
-`ops[].spawns` holds deref’d `ENTB*` records (`typeId`, XYZ, `spawnEventId`, …). `ops[].camera` on `CCTB` job `0x40` has `camGroup` / `startFrame` / `endFrame` / `flags` indexing `camALL.rbh`. Empty root slots appear as `"offset": null, "scenes": []`.
+`ops[].spawns` holds deref’d `ENTB*` records (`typeId`, XYZ floats, `rx`/`ry`/`rz` integer angle words, `spawnEventId`, …). `ops[].camera` on `CCTB` job `0x40` has `camGroup` / `startFrame` / `endFrame` / `flags` indexing `camALL.rbh`. Empty root slots appear as `"offset": null, "scenes": []`. The file is `jsonutil.write_json`: whole floats such as spawn XYZ print as `n.0`. Angle words print as integers.

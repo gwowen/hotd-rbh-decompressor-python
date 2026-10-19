@@ -1,7 +1,7 @@
 """
 Stage / creature mesh RBHF (world*.rbh, CREAT*.rbh).
 
-Container (FUN_00419cac / FUN_00419cf4 → FUN_005769c0):
+Container (`LoadCreatMeshBank` (`FUN_00419cac`) / `LoadWorldMeshBank` (`FUN_00419cf4`) → `LoadPiffRbh` (`FUN_005769c0`)):
   RBHH flags 2,0,0 → BODY0 graph + id table, BODY1 f32×3 verts, BODY2 empty
   RELC0 patches BODY0; RELC1 marks vertBase fields (offsets into BODY1)
 
@@ -20,7 +20,7 @@ Mesh node:
   World only: +0x20 f32 posX,Y,Z then batches at +0x2C
   Creat: batches at +0x20
 
-Prim batches (FUN_00578bb0): header u16 count, flags, unk, sizeShorts
+Prim batches (`DispatchMeshPrims` (`FUN_00578bb0`)): header u16 count, flags, unk, sizeShorts
   kind = flags & 0x2007
     0      plain tri   (4 shorts)
     2      textured tri (18 shorts / 36 B)

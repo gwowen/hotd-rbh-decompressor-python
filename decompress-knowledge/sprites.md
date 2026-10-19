@@ -2,7 +2,7 @@
 
 `assets/sprite/spr.rbh` is **sprite metadata**: UV rectangles and VVTP page ids. It does not contain pixels. Draw with a `.vmc` bank (`pageId` → `page_XXXX.png`).
 
-Decomp: sprite records are reached via `DAT_005ce544` (`FUN_004430a4` getter, `FUN_004434b0` scroll-sprite helper).
+Decomp: sprite records are reached via `DAT_005ce544` (`GetSpriteRecord` (`FUN_004430a4`) getter, `StampScrollSprite` (`FUN_004434b0`) scroll-sprite helper).
 
 ## Container
 
@@ -60,17 +60,17 @@ offset  size  field
 ## How the tool works
 
 ```text
-bun run index.ts -s|--sprites <file.rbh> [outdir]
+uv run hotd-decompress -s|--sprites <file.rbh> [outdir]
 ```
 
-`convertSpritesToJson` (`src/sprite.ts`) uses `loadRbh` (no PACK expand).
+`convert_sprites_to_json` (`src/hotd_decompress/sprite.py`) uses `load_rbh` (no PACK expand).
 
 1. Require exactly one BODY.
-2. `isSpriteBody`: first `u32` is a 4-aligned offset into the BODY; `frameCount` at that record is ≤ 4096.
+2. `is_sprite_body`: first `u32` is a 4-aligned offset into the BODY; `frameCount` at that record is ≤ 4096.
 3. `count = firstPtr / 4`. For each slot, `ptr == 0` → skip (counted as `skippedNull`); else parse the record and its frames.
 4. Write `sprites.json`. Default dir: `decompressed_assets/<stem>_spr/` (so `spr.rbh` → `spr_spr/`).
 
-JSON: `source`, `count`, `skippedNull`, `sprites[]` with header UVs, size, and per-frame rect / `pageId` / flags.
+JSON: `source`, `count`, `skippedNull`, `sprites[]` with header UVs, size, and per-frame rect / `pageId` / flags. Written by `jsonutil.write_json` (whole floats print as `n.0`).
 
 Stdout: sprite count, skipped null slots, output path.
 

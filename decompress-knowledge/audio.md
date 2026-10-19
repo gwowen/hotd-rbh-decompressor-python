@@ -2,9 +2,9 @@
 
 Digital sound effects live in RBHF files under `assets/sound/`. They are already uncompressed (`BODY` only, no `PACK`).
 
-Stage / menu **music** is CD audio via MCI (`cdaudio`) in the exe. It is not in these files.
+Stage / menu **music** is CD audio via MCI (`cdaudio`) in the exe. It is not in these files. Event scripts can still **request** it: `SNDON` kind 3 calls `PlayCdAudioTrack` (`FUN_00565d60`). See [cutscene-audio.md](cutscene-audio.md).
 
-Decomp: `FUN_00411f10` inits the mixer at **11025 Hz, 8-bit, 3 voices**. The “3 channels” are mixer voices, not stereo in the files. Sample rate constant `_DAT_00c721e4 = 0x2b11`. Runtime oneshoots are requested as `sound\O_%s.rbh`.
+Decomp: `InitSoundMixer` (`FUN_00411f10`) inits the mixer at **11025 Hz, 8-bit, 3 voices**. The “3 channels” are mixer voices, not stereo in the files. Sample rate constant `_DAT_00c721e4 = 0x2b11`. Runtime oneshoots are requested as `sound\O_%s.rbh`.
 
 ## Shared PCM format
 
@@ -15,7 +15,7 @@ Decomp: `FUN_00411f10` inits the mixer at **11025 Hz, 8-bit, 3 voices**. The “
 | Channels | Mono |
 | Silence | ≈ `0x80` |
 
-This tool writes standard PCM WAVs (`src/wav.ts`) with those parameters.
+This tool writes standard PCM WAVs (`src/hotd_decompress/wav.py`) with those parameters.
 
 ## Oneshoot — `O_*.rbh`
 
@@ -31,7 +31,7 @@ BODY:
 
 `0x00082C30` is also the **external-ref sentinel** in `gamesnds.rbh` (see below). `soundId` is how the bank points at a sibling `O_*` file.
 
-Export: `bun run index.ts -w assets/sound/O_HELP.rbh` → `decompressed_assets/O_HELP_wav/O_HELP.wav`.
+Export: `uv run hotd-decompress -w assets/sound/O_HELP.rbh` → `decompressed_assets/O_HELP_wav/O_HELP.wav`.
 
 ## Bank — `gamesnds.rbh`
 
@@ -46,7 +46,7 @@ Index size must be a multiple of `0x28`. This tool requires `sampleRate` at `+0x
 
 ### Index row (0x28 bytes)
 
-Known fields used by `src/audio.ts`:
+Known fields used by `src/hotd_decompress/audio.py`:
 
 ```
 offset  size  field
@@ -76,21 +76,25 @@ Output names:
 ## How the tool works
 
 ```text
-bun run index.ts -w|--wav <file.rbh> [outdir]
+uv run hotd-decompress -w|--wav <file.rbh> [outdir]
 ```
 
-`convertSoundsToWav` (`src/audio.ts` + `src/wav.ts`):
+`convert_sounds_to_wav` (`src/hotd_decompress/audio.py` + `wav.py`):
 
-1. `loadPiff` + `decompressPiff` (sound files in this tree have no PACK; this is a no-op).
+1. `load_piff` + `decompress_piff` (sound files in this tree have no PACK; this is a no-op).
 2. Collect `BODY` chunks.
 3. **Oneshoot** if there is one BODY starting with `0x00082C30` / `u16 2`. Clip name = input stem (`O_HELP.rbh` → `O_HELP.wav`).
 4. **gamesnds** if there are two BODYs, index length `% 0x28 == 0`, and `+0x08` of the first row is `0x2B11`. Then:
    - scan `dirname(input)` for `O_*.rbh`, parse each oneshoot, key by `soundId`;
    - embedded rows → slice BODY1, name `clip_XXX`;
    - external rows → copy the matching oneshoot, name `ext_XXX_O_NAME`; missing siblings increment `skippedExternal` and are omitted.
-5. `encodeWavPcm8Mono` — RIFF WAV, unsigned 8-bit, 1 channel, 11025 Hz.
+5. `encode_wav_pcm8_mono` — RIFF WAV, unsigned 8-bit, 1 channel, 11025 Hz.
 6. Default dir: `decompressed_assets/<stem>_wav/`.
 
 Stdout: clip count, format line, skipped external refs (if any), files written.
 
-Zero clips → exit 1 (wrong file, or CD music path). The tool does not touch MCI `cdaudio`.
+Zero clips → exit 1 (wrong file, or CD music path). A batch walk counts that as a skip (`WAV skip (no clips)`). The tool does not touch MCI `cdaudio`.
+
+## Sound-request table (`THOTD.exe`)
+
+`SNDON` in `evtALL.rbh` does **not** store a filename. The u32 arg indexes `DAT_005cbda8` (270 × `0x0C` rows). Kind 4 sprintf's `sound\O_%s.rbh`; kinds 1–2 play `gamesnds.rbh` row `extra`; kind 3 is a CD track. Cue join: [cutscene-audio.md](cutscene-audio.md). Parser: `src/hotd_decompress/sound_table.py` (not a CLI flag).

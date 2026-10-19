@@ -15,7 +15,7 @@ SpriteRecord:
     +0x0C u16 pageId          // VVTP page id (same as -p page_XXXX)
     +0x0E u16 flags
 
-Pixels live in .vmc banks, not this file (FUN_004430a4 / FUN_004434b0).
+Pixels live in .vmc banks, not this file (`GetSpriteRecord` (`FUN_004430a4`) / `StampScrollSprite` (`FUN_004434b0`)).
 """
 
 from __future__ import annotations

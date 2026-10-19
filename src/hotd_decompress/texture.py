@@ -12,7 +12,7 @@ Header (0x40 bytes) then tightly packed 16-bit pixels:
   +0x18 u32 green mask (0x03e0)
   +0x1c u32 blue mask  (0x001f)
 
-Pixel format matches hotd-decomp FUN_0045640c (RGB555 + 0x8000 bit).
+Pixel format matches hotd-decomp `PackRgb555` (`FUN_0045640c`) (RGB555 + 0x8000 bit).
 0x0000 and 0x8421 are treated as transparent (engine clear color).
 """
 

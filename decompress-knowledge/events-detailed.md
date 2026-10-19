@@ -8,7 +8,7 @@ This note is the **bytecode** inside each section: opcode names from `THOTD.exe`
 
 ### Load
 
-`FUN_00418aa0` requests `evt\allstage\evtall.rbh`. `DAT_00d5a5d0 = *(handle + 4)` is the BODY base.
+`LoadStageAssets` (`FUN_00418aa0`) requests `evt\allstage\evtall.rbh`. `DAT_00d5a5d0 = *(handle + 4)` is the BODY base.
 
 Packed playhead bytes:
 
@@ -19,7 +19,7 @@ Packed playhead bytes:
 | `DAT_00da0cf0` | EventNo (section index) |
 | `DAT_00da0ab8` | PC (pointer into BODY) |
 
-Bind (`0x4c0d3c`):
+Bind (`BindEventPlayhead` (`0x4c0d3c`)):
 
 ```
 PC = stages[StageNo][SceneNo][EventNo]
@@ -39,11 +39,11 @@ Debug UI names at `s_Stage_01_005ce918` / `PTR_s_Scene_000_005ceba4`:
 | 7 | *(null)* | 0 |
 | 8 | extra (no UI label) | 6 |
 
-`FUN_00422808` (stage-select) counts until the **first** `0xFFFFFFFF`, so it only sees slots 0–6. Gameplay indexes by StageNo directly; slot 8 is reachable if that byte is set.
+`CountStagesForSelectUi` (`FUN_00422808`) (stage-select) counts until the **first** `0xFFFFFFFF`, so it only sees slots 0–6. Gameplay indexes by StageNo directly; slot 8 is reachable if that byte is set.
 
 ### Tick
 
-`0x4c0db0`: `opcode = *PC`; `call handlers[opcode]` at `DAT_005eeac0`. Names sit in DGROUP at `0x5a3a00` (`0x00 : nop` … `0x5d : NEXTEV`).
+`TickEventVm` (`0x4c0db0`): `opcode = *PC`; `call handlers[opcode]` at `DAT_005eeac0`. Names sit in DGROUP at `0x5a3a00` (`0x00 : nop` … `0x5d : NEXTEV`).
 
 `DAT_00da0a98` is the yield flag. A wait op sets it and returns; the next frame retries the same opcode until the condition holds, then advances PC.
 
@@ -51,7 +51,7 @@ Debug UI names at `s_Stage_01_005ce918` / `PTR_s_Scene_000_005ceba4`:
 
 EventNo is the **section index**. It is not the old JSON `eventId` field (that was a one-word opcode, usually `NEXTEV` / `CLTB` / `KGTB`).
 
-A different id lives on spawned entities at `+0xd4` (from the spawn record’s `+0x24` byte). Enemy/prop helpers (`FUN_004812e4`, `FUN_00482bf8`) switch on that.
+A different id lives on spawned entities at `+0xd4` (from the spawn record’s `+0x24` byte). Enemy/prop helpers (`EnemyHelperBySpawnEventId` (`FUN_004812e4`), `SpawnSecondaryWave` (`FUN_00482bf8`)) switch on that.
 
 ## Stream layout
 
@@ -63,7 +63,7 @@ Most immediates are `opcode + one u32` (PC += 8). `WAIT_CAMJOB` / `SCNINIT` / `N
 
 ## Opcode table
 
-Handler `LAB_00471658` is idle (does not advance PC). Those slots are **nop** in the exe strings and do not appear as real script ops. The tool stops if it hits an unknown word (spawn payload / padding).
+Handler `EventVmNop` (`LAB_00471658`) is idle (does not advance PC). Those slots are **nop** in the exe strings and do not appear as real script ops. The tool stops if it hits an unknown word (spawn payload / padding).
 
 | Op | Name | Encoding | Role |
 |----|------|----------|------|
@@ -109,7 +109,7 @@ Handler `LAB_00471658` is idle (does not advance PC). Those slots are **nop** in
 | `0x55` | `WAIT_ENALV` | +1 | Wait until enemies-alive ≤ arg |
 | `0x57` | `RNWCJ` | +2 | Renew camera job / bump wait counter (`arg1` often `0xFFFFFFFF`) |
 | `0x58` | `ITEMON` | +1 | Enable item flag at `DAT_00d9f618[arg]` |
-| `0x5a` | `SNDON` | +1 | Play digital SFX (`FUN_00412000`) |
+| `0x5a` | `SNDON` | +1 | Play a sound-request row (`PlayDigitalSfx` (`FUN_00412000`)). Arg is a `DAT_005cbda8` index, not a filename — [cutscene-audio.md](cutscene-audio.md) |
 | `0x5b` | `ATCMD` | +1 | Attract-mode command |
 | `0x5c` | `WAIT` | 0 | Yield forever (does not advance PC) |
 | `0x5d` | `NEXTEV` | 0 | Next event / scene |
@@ -118,7 +118,7 @@ Retail histogram (top): `CCTB` 1718, `WAIT_CAMJOB` 728, `NEXTEV` 521, `WAIT_CAMF
 
 ## Spawn records (`ENTB*`)
 
-List operands are **BODY offsets**, not inline coordinates. `ENTB` (`0x46e5c8`) reads each pointer, looks up `DAT_005d8118[typeId]` (spawn function), and copies the record into a new entity (`FUN_0043e400`).
+List operands are **BODY offsets**, not inline coordinates. `ENTB` (`EvtOpEntb` (`0x46e5c8`)) reads each pointer, looks up `DAT_005d8118[typeId]` (spawn function), and copies the record into a new entity (`AllocEntity` (`FUN_0043e400`)).
 
 ### `ENTB` / `ET*` / `ENTB3` (0x28 bytes)
 
@@ -129,9 +129,9 @@ offset  size  field
 0x08    4     f32 x
 0x0C    4     f32 y
 0x10    4     f32 z
-0x14    4     f32 rx
-0x18    4     f32 ry
-0x1C    4     f32 rz
+0x14    4     u32 rx         integer full-circle angle word → entity+0x34
+0x18    4     u32 ry         integer full-circle angle word → entity+0x38
+0x1C    4     u32 rz         integer full-circle angle word → entity+0x3C
 0x20    1     posMode        low 2 bits: 0 = raw XYZ, 1/2 = transform
 0x22    2     u16 combat HP  copied to entity+0x7a **and** +0x78 (drained on hit)
 0x24    1     spawnEventId   → entity+0xd4
@@ -142,6 +142,10 @@ offset  size  field
 
 `typeId` is a spawn-function index (**136** live slots in this `THOTD.exe`, max 256), **not** the 94-row creature table in [creatures.md](creatures.md). `spawnEventId` is the byte those creature helpers switch on.
 
+XYZ are IEEE floats. **RX/RY/RZ are integer angle words**, not floats (`65536 = 360°`). `EvtOpEntb` (`FUN_0046e5c8`) at `0x46E749–0x46E758` copies the three dwords at record `+0x14/+0x18/+0x1C` directly to entity `+0x34/+0x38/+0x3C`. The corpus is dominated by full-circle values such as `0x4000` / `0x8000` / `0xC000`. Scene 002’s two slot-102 records use `(0, 0xD000, 0)` and `(0, 0x3000, 0)`. Exporting those words as `f32` yields ~`7.46e-41` / ~`1.72e-41`. `-e` keeps the integer bits.
+
+This note is **bytecode decode**, not VM execution. The tool walks opcodes and writes JSON; it does not run `TickEventVm` (`FUN_004c0db0`). Zero `undecoded` words does not prove every payload byte was understood: the walker stops at an unsupported opcode and treats the rest as trailing spawn bytes.
+
 ### `ENTB2` (8 bytes)
 
 ```
@@ -151,13 +155,13 @@ offset  size  field
 
 ### `ENTBE` (≥ 0x24 bytes)
 
-Same 6 floats as `ENTB`, then `u16` at `+0x20`. The handler stores `record+0x24` at `entity+0x364` (extra payload pointer).
+Same XYZ floats and RX/RY/RZ integer angle words as `ENTB`, then `u16` at `+0x20`. The handler stores `record+0x24` at `entity+0x364` (extra payload pointer).
 
 XYZ is stage space (same as world meshes / camera rails). Example from Stage 01 event 4: type 100 at `(17, -25, -1125)` and `(-30, -25, -1165)`, `spawnEventId` 19 and 17.
 
 ## `CCTB` → `camALL` groups
 
-`CCTB` does not embed splines. It queues the current instruction onto a 16-slot ring (`DAT_00d9f1f0`). `FUN_0045f414` reads `*(PC+4)` as a **camera job type** and dispatches `DAT_005d8418[job]`.
+`CCTB` does not embed splines. It queues the current instruction onto a 16-slot ring (`DAT_00d9f1f0`). `DispatchCameraJob` (`FUN_0045f414`) reads `*(PC+4)` as a **camera job type** and dispatches `DAT_005d8418[job]`.
 
 Word count including opcode:
 
@@ -177,14 +181,14 @@ n = ((job / 16) * 4 + 8) / 4
 | `0x21` | 4 | `camMode2` | 2 args |
 | `0x40` | 6 | `rail` | start, end, **camGroup**, flags |
 
-Job `0x40` (`FUN_00460f88` → `FUN_00460fd0`) is the rail bind:
+Job `0x40` (`BindCameraRailJob` (`FUN_00460f88`) → `BindCameraRail` (`FUN_00460fd0`)) is the rail bind:
 
 | Word | Copied to | Meaning |
 |------|-----------|---------|
 | start | `DAT_00d9ed04` / slot `+0x120` | Start frame (`−1` keeps current `t`) |
 | end | `DAT_00d9ed08` / slot `+0x124` | End frame (tick while `t < end`) |
 | camGroup | `DAT_00da0ca4` / slot `+0x128` | `camALL.rbh` group index 0–141 |
-| flags | `DAT_00d9ed10` / slot `+0x12C` | Bit 1 (`2`) changes bind behaviour |
+| flags | `DAT_00d9ed10` / slot `+0x12C` | Bind flags. The update at `0x461171` tests mask **4**. Mask **2** is common in rail data and is a different bit — do not collapse the two |
 
 Retail: 993 `rail` binds, 117 distinct groups, indices 0–141 (the full `camALL` range). Typical pattern:
 
@@ -214,19 +218,37 @@ NEXTEV
 
 Event 4 later binds `camALL` group 0 at frames 741–770, spawns two type-100 enemies, then group 1 at 801–890.
 
+## Example (Stage 01, `Scene 002` — gameplay corridor)
+
+Scene-to-scene setup is event 0 (`SNDON 9` / `CHGSM 6` / `NEXTEV`). Events 1–2 are the corridor:
+
+```
+SCNINIT
+FKRTB    ptr → floor Y
+SKYTB    1
+ENTB     typeId 102
+CCTB rail g3 [0,80)
+WAIT_CAMFRM 70 / RNWCJ
+WAIT_ENALV 0
+CAMDR    3
+NEXTEV
+```
+
+Then another type-102 spawn, group 3 `[81,150)` with `WAIT_ENALV 0`, then a 9-frame exit `[151,160)`. Three rail binds. That is the `WAIT_ENALV`-after-rail pattern from [cutscenes.md](cutscenes.md). The two slot-102 records use angle words `(0, 0xD000, 0)` and `(0, 0x3000, 0)`.
+
 ## How the tool works
 
 ```text
-bun run index.ts -e|--evt <file.rbh> [outdir]
+uv run hotd-decompress -e|--evt <file.rbh> [outdir]
 ```
 
-`convertEventsToJson` (`src/event.ts`):
+`convert_events_to_json` (`src/hotd_decompress/event.py`):
 
 1. Same root/scene/section pointer walk as [events.md](events.md).
 2. Collect every section offset; bound each by the next offset in BODY order (sections are not always sequential inside a scene).
 3. Walk `u32` opcodes with the table above. List ops consume pointers until `0xFFFFFFFF`. `CCTB` size uses the job-type formula.
-4. Deref `ENTB*` pointers into spawn records; deref `WLTB` / `FKRTB` pointers into floats.
+4. Deref `ENTB*` pointers into spawn records (XYZ floats, RX/RY/RZ integer angle words); deref `WLTB` / `FKRTB` pointers into floats.
 5. Job `0x40` becomes `camera: { jobName: "rail", startFrame, endFrame, camGroup, flags }`.
 6. Write `events.json`. Stdout also prints op / spawn / rail-bind counts.
 
-JSON extras vs the raw tree: `name` on stages/scenes (from the exe strings), `ops[]` on each section, `spawns` / `camera` / `floats` on ops. `words` is the script slice only (internal list terminators kept; trailing spawn bytes omitted). The old one-word `eventId` field is gone — that word is `ops[0].name`.
+JSON extras vs the raw tree: `name` on stages/scenes (from the exe strings), `ops[]` on each section, `spawns` / `camera` / `floats` on ops. `words` is the script slice only (internal list terminators kept; trailing spawn bytes omitted). The old one-word `eventId` field is gone — that word is `ops[0].name`. `jsonutil.write_json` prints whole floats as `n.0`.
